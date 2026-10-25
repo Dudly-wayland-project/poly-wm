@@ -1,0 +1,19 @@
+[package]
+name = "poly-config"
+description = "Lua configuration types and loader for the Poly compositor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+bitflags = "2"
+mlua = { version = "0.12", features = ["lua54", "vendored"] }
+poly-ipc = { path = "../poly-ipc" }
+thiserror.workspace = true
+tracing.workspace = true
+# Same version as smithay's, so `xkbcommon::xkb::Keysym` is one and the same
+# type across the workspace.
+xkbcommon = { version = "0.9", default-features = false }

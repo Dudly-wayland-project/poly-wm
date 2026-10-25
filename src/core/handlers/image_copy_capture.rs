@@ -1,0 +1,291 @@
+//! `ext-image-copy-capture-v1` + `ext-image-capture-source-v1`.
+//!
+//! This is what `grim`, `wl-mirror`, screen recorders and `xdg-desktop-portal`
+//! screencasts use on Poly; `wlr-screencopy-unstable-v1` is not implemented on
+//! purpose, because those clients prefer the `ext` pair when both exist.
+//!
+//! Capture is on demand: a frame is rendered as soon as the client calls
+//! `capture`, from the live window/layer state, into the client's own shm
+//! buffer (`render::capture_output`). Each session keeps an offscreen texture
+//! and a damage tracker (`crate::core::capture`), so a capture never shows a
+//! stale frame while a stream of captures only redraws, reads back and copies
+//! what changed — and costs nothing while the screen is idle.
+//!
+//! The protocol only supports `Xrgb8888` shm buffers for now, which is enough
+//! for every client that matters today (`docs/plan.md` §17).
+//!
+//! Toplevel capture (`grim -T`) needs `ext-foreign-toplevel-image-capture-
+//! source-v1`; Poly only implements output capture, so those clients see no
+//! toplevel source manager and refuse to run.
+
+use smithay::output::Output;
+use smithay::reexports::wayland_server::protocol::wl_shm;
+use smithay::utils::{Size, Transform};
+use smithay::wayland::image_capture_source::{
+    ImageCaptureSource, ImageCaptureSourceHandler, OutputCaptureSourceHandler,
+    OutputCaptureSourceState,
+};
+use smithay::wayland::image_copy_capture::{
+    BufferConstraints, CaptureFailureReason, Frame, FrameRef, ImageCopyCaptureHandler,
+    ImageCopyCaptureState, Session, SessionRef,
+};
+use tracing::{debug, info, warn};
+
+use crate::core::capture::CaptureKey;
+use crate::state::State;
+
+impl ImageCaptureSourceHandler for State {}
+
+impl OutputCaptureSourceHandler for State {
+    fn output_capture_source_state(&mut self) -> &mut OutputCaptureSourceState {
+        return &mut self.core.output_capture_source_state;
+    }
+
+    fn output_source_created(&mut self, source: ImageCaptureSource, output: &Output) {
+        // Remember which output this source stands for; `capture_constraints`
+        // and `frame` read it back through the source's user data.
+        source.user_data().insert_if_missing(|| {
+            return output.downgrade();
+        });
+    }
+}
+
+impl ImageCopyCaptureHandler for State {
+    fn image_copy_capture_state(&mut self) -> &mut ImageCopyCaptureState {
+        return &mut self.core.image_copy_capture_state;
+    }
+
+    fn capture_constraints(&mut self, source: &ImageCaptureSource) -> Option<BufferConstraints> {
+        let Some(output) = source_output(source) else {
+            debug!("capture refused: the source is not an output of ours");
+            return None;
+        };
+        return output_constraints(&output);
+    }
+
+    fn new_session(&mut self, session: Session) {
+        // A ticket for the per-session state in `State::capture`. It goes into
+        // the session's user data because `SessionRef` has no object id to key a
+        // map by, and the GL objects themselves cannot live there (user data has
+        // to stay `Send + Sync`).
+        let key = self.capture.create();
+        session.user_data().insert_if_missing(|| return key);
+        // Smithay stops the session as soon as this value is dropped, so it has
+        // to live until the client destroys the session object.
+        self.core.image_copy_sessions.push(session);
+    }
+
+    fn frame(&mut self, session: &SessionRef, frame: Frame) {
+        let Some(output) = source_output(&session.source()) else {
+            warn!("capture frame dropped: the session's output is gone");
+            frame.fail(CaptureFailureReason::Unknown);
+            return;
+        };
+        let Some(key) = session.user_data().get::<CaptureKey>().copied() else {
+            warn!("capture frame dropped: the session has no capture state");
+            frame.fail(CaptureFailureReason::Unknown);
+            return;
+        };
+        let draw_cursor = session.draw_cursor();
+        let buffer = frame.buffer();
+        // The renderer belongs to the backend, this state to the core; splitting
+        // the borrow is what lets the element list be built while rendering and
+        // the session state be updated in the same call
+        // (`crate::core::render::capture_output`).
+        let State {
+            backend,
+            core,
+            capture,
+        } = self;
+        let captured = backend
+            .with_gles_renderer_for_output(&output, |renderer| {
+                return crate::core::render::capture_output(
+                    core,
+                    capture,
+                    key,
+                    renderer,
+                    &output,
+                    draw_cursor,
+                    &buffer,
+                );
+            })
+            .unwrap_or_else(|| {
+                return Err(anyhow::anyhow!("no renderer for output {}", output.name()));
+            });
+        match captured {
+            Ok(outcome) => {
+                debug!(
+                    output = output.name(),
+                    ?outcome,
+                    "captured output for a client"
+                );
+                // `Full` reports the whole buffer, `Damage` only the regions
+                // that were written, `Unchanged` none at all — the client's
+                // buffer already holds the current picture. The protocol
+                // measures damage against the previous `ready` of the session,
+                // and we always report a superset of what we wrote.
+                frame.success(
+                    Transform::Normal,
+                    outcome.frame_damage(),
+                    core.start_time.elapsed(),
+                );
+            }
+            Err(err) => {
+                warn!("error capturing output {}: {err}", output.name());
+                frame.fail(CaptureFailureReason::Unknown);
+            }
+        }
+    }
+
+    fn frame_aborted(&mut self, frame: FrameRef) {
+        // Nothing is queued for a frame: it is either rendered inside `frame`
+        // or already dead. A frame object that is destroyed before `capture`
+        // simply never reaches us.
+        let _ = frame;
+    }
+
+    fn session_destroyed(&mut self, session: SessionRef) {
+        if let Some(key) = session.user_data().get::<CaptureKey>().copied() {
+            self.capture.remove(key);
+        }
+        self.core
+            .image_copy_sessions
+            .retain(|live| return **live != session);
+        self.core.image_copy_capture_state.cleanup();
+    }
+}
+
+/// The output a capture source stands for, if it is one of ours.
+fn source_output(source: &ImageCaptureSource) -> Option<Output> {
+    return source
+        .user_data()
+        .get::<smithay::output::WeakOutput>()
+        .and_then(|weak| return weak.upgrade());
+}
+
+/// The buffer constraints a client capturing `output` has to satisfy.
+fn output_constraints(output: &Output) -> Option<BufferConstraints> {
+    let Some(mode) = output.current_mode() else {
+        debug!("capture refused: output {} has no mode", output.name());
+        return None;
+    };
+    if mode.size.w <= 0 || mode.size.h <= 0 {
+        return None;
+    }
+    // Buffer coordinates, i.e. the size the client has to allocate. Grim and
+    // friends only use shm, and every one of them understands `Xrgb8888`;
+    // dmabuf would need the render node of the output's GPU.
+    return Some(BufferConstraints {
+        size: Size::from((mode.size.w, mode.size.h)),
+        shm: vec![wl_shm::Format::Xrgb8888],
+        dma: None,
+    });
+}
+
+/// Keep the capture sessions in sync with the outputs they capture.
+///
+/// Two things the protocol has no other way to express:
+///
+/// * A session outlives the output unless the compositor stops it. Smithay
+///   stops a session when its `Session` value is dropped (that is what
+///   `Session::stop` does), so an output that went away means dropping the
+///   session here — otherwise `xdg-desktop-portal-wlr`-style clients keep
+///   capturing an output that no longer exists and never learn about it.
+/// * When the output changes size the client has to be told, because it
+///   allocates buffers up front and re-uses them. `update_constraints` is the
+///   only way to send a new `buffer_size`, and without it a client keeps
+///   handing us buffers of the old size while the renderer paints the new one.
+///
+/// This runs from the event loop instead of the hotplug paths because those
+/// only borrow `&mut Core`, and the capture state (per-session offscreen
+/// textures) lives on `State`.
+pub(crate) fn refresh_sessions(state: &mut State) {
+    let mut stopped = Vec::new();
+    let mut resized = Vec::new();
+    for (index, session) in state.core.image_copy_sessions.iter().enumerate() {
+        // A source whose output object is already gone upgrades to `None`; the
+        // session has to be stopped either way (`space` also drops the output
+        // when it is merely disabled, which keeps the object alive).
+        let Some(output) = source_output(&session.source()) else {
+            stopped.push((index, String::from("an output that no longer exists")));
+            continue;
+        };
+        if !state.core.space.outputs().any(|live| live == &output) {
+            stopped.push((index, output.name()));
+            continue;
+        }
+        let Some(constraints) = output_constraints(&output) else {
+            continue;
+        };
+        // Constraints carry no `PartialEq`; only the size can change for the
+        // shm-only setup we advertise, and `shm` never does.
+        let stale = constraints_stale(session.current_constraints().as_ref(), &constraints);
+        if stale {
+            resized.push((index, output.name(), constraints));
+        }
+    }
+    for (index, name, constraints) in resized {
+        debug!(
+            output = name,
+            size = ?constraints.size,
+            "re-sending capture constraints after an output resize"
+        );
+        if let Some(session) = state.core.image_copy_sessions.get(index) {
+            session.update_constraints(constraints);
+        }
+    }
+    // Drops the session, which is what sends `stopped` and fails the frame in
+    // flight. The per-session capture state stays until `session_destroyed`, so
+    // a client that still destroys its session object releases the texture.
+    for (index, name) in stopped.into_iter().rev() {
+        state.core.image_copy_sessions.remove(index);
+        info!("stopped a capture session for {name}");
+    }
+}
+
+/// Whether the client has to be told about the constraints again.
+///
+/// `BufferConstraints` has no `PartialEq` and the shm format list never changes
+/// here, so the size is the whole story: a client that allocated 1920x1080
+/// buffers keeps handing them over while the output is 2560x1600.
+pub(crate) fn constraints_stale(
+    current: Option<&BufferConstraints>,
+    wanted: &BufferConstraints,
+) -> bool {
+    return match current {
+        Some(current) => current.size != wanted.size,
+        None => true,
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use smithay::utils::Buffer as BufferCoords;
+
+    use super::*;
+
+    fn constraints(width: i32, height: i32) -> BufferConstraints {
+        return BufferConstraints {
+            size: Size::<i32, BufferCoords>::from((width, height)),
+            shm: vec![wl_shm::Format::Xrgb8888],
+            dma: None,
+        };
+    }
+
+    #[test]
+    fn a_session_that_never_got_constraints_is_stale() {
+        assert!(constraints_stale(None, &constraints(1920, 1080)));
+    }
+
+    #[test]
+    fn unchanged_constraints_are_not_resent() {
+        let same = constraints(1920, 1080);
+        assert!(!constraints_stale(Some(&same), &constraints(1920, 1080)));
+    }
+
+    #[test]
+    fn a_resized_output_makes_the_session_stale() {
+        let old = constraints(1920, 1080);
+        assert!(constraints_stale(Some(&old), &constraints(2560, 1600)));
+    }
+}

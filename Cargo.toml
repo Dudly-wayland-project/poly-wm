@@ -1,0 +1,89 @@
+[workspace]
+members = ["poly-config", "poly-ipc", "tools/capture-bench"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+license = "GPL-3.0-or-later"
+repository = "https://codeberg.org/FuncSonicYEAH/poly-wm"
+authors = ["FuncSonicYEAH / Citamora","Poly contributors"]
+
+[workspace.dependencies]
+anyhow = "1.0.104"
+thiserror = "2.0.21"
+tracing = { version = "0.1.44", features = ["max_level_trace", "release_max_level_debug"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+[workspace.dependencies.smithay]
+# Pinned to a fixed git revision (0.7.0) for reproducible builds.
+git = "https://github.com/Smithay/smithay.git"
+rev = "118e34ffc9b99854a2230c4805e1f37dc9029edb"
+default-features = false
+
+[workspace.dependencies.smithay-drm-extras]
+git = "https://github.com/Smithay/smithay.git"
+rev = "118e34ffc9b99854a2230c4805e1f37dc9029edb"
+
+[package]
+name = "poly"
+description = "A Wayland compositor with Lua-scriptable layouts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "poly"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+bitflags = "2"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+calloop = { version = "0.14.0", features = ["signals"] }
+clap = { version = "4.6.7", features = ["derive"] }
+libc = "0.2.189"
+xcursor = "0.3.11"
+glam = "0.33"
+ab_glyph = "0.2"
+smithay-drm-extras.workspace = true
+poly-config = { path = "poly-config" }
+poly-ipc = { path = "poly-ipc" }
+zbus = { version = "5.19.0", default-features = false, features = ["blocking-api", "async-io"], optional = true }
+
+[dependencies.smithay]
+workspace = true
+features = [
+    "backend_drm",
+    "backend_egl",
+    "backend_gbm",
+    "backend_libinput",
+    "backend_session_libseat",
+    "backend_udev",
+    "backend_winit",
+    "desktop",
+    "renderer_gl",
+    "renderer_multi",
+    "use_system_lib",
+    "wayland_frontend",
+]
+
+[profile.release]
+debug = "line-tables-only"
+overflow-checks = true
+lto = "thin"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[features]
+dbus = ["dep:zbus"]

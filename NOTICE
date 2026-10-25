@@ -1,0 +1,60 @@
+Poly — a Wayland compositor
+Copyright (C) 2026 Poly contributors
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See LICENSE.
+
+===============================================================================
+Third-party code
+===============================================================================
+
+niri — https://github.com/YaLTeR/niri
+  Copyright (c) Ivan Molodetskikh and niri contributors
+  License: GPL-3.0-or-later
+  Ported / adapted files:
+    src/utils/signals.rs   <- niri src/utils/signals.rs
+    src/utils/spawn.rs     <- niri src/utils/spawning.rs (double-fork, sigmask reset)
+    src/core/output.rs     <- niri src/niri.rs (RedrawState state machine, frame callbacks)
+    src/backend/udev.rs    <- niri src/backend/tty.rs (session resume, estimated vblank timer)
+    src/core/render.rs     <- niri src/backend/mod.rs, src/render_helpers/mod.rs
+    src/core/render/elements.rs      <- niri src/render_helpers/clipped_surface.rs
+    src/core/render/decorations.rs   <- niri src/render_helpers/{border,shadow,blur}.rs
+    src/core/render/blur.rs          <- niri src/render_helpers/{blur,framebuffer_effect}.rs
+    src/core/render/shaders.rs       <- niri src/render_helpers/shaders/mod.rs
+    src/core/render/visual.rs        <- niri src/utils/mod.rs (CornerRadius)
+    src/core/render/shaders/*.frag   <- niri src/render_helpers/shaders/*.frag
+    src/core/ui/toast.rs             <- niri src/ui/config_error_notification.rs
+    src/core/window.rs               <- niri src/window/unmapped.rs, src/handlers/compositor.rs
+    src/core/ipc/server.rs           <- niri src/ipc/server.rs (per-client calloop sources,
+                                        bounded write queue, slow-client disconnect)
+    src/core/ipc/events.rs           <- niri src/niri.rs (state snapshots for the event stream;
+                                        the diffing itself is poly's own design)
+    poly-ipc/src/protocol.rs         <- niri-ipc/src/lib.rs (request/reply/event types)
+    poly-ipc/src/socket.rs           <- niri-ipc/src/socket.rs (socket path convention, client)
+    poly-ipc/src/state.rs            <- niri-ipc/src/state.rs (EventStreamState client mirror)
+    src/core/handlers/image_copy_capture.rs
+                                     <- niri src/handlers/image_copy_capture.rs (ext-image-copy-capture
+                                        handlers: on-demand render straight into the client's buffer,
+                                        cursor via the session's paint-cursors option)
+
+Smithay / anvil — https://github.com/Smithay/smithay
+  Copyright (c) 2017 Victor Berger and Victoria Brekenfeld
+  License: MIT
+  Adapted:
+    src/backend/udev.rs    <- anvil/src/udev.rs (device/connector setup)
+    src/core/cursor.rs     <- anvil/src/cursor.rs (xcursor loading)
+    resources/cursor.rgba  <- anvil/resources/cursor.rgba (fallback cursor)
+  Used as-is (Wayland protocol implementations, not copied):
+    src/wayland/image_copy_capture    (ext-image-copy-capture-v1)
+    src/wayland/image_capture_source  (ext-image-capture-source-v1,
+                                       ext-output-image-capture-source-v1)
+    -> poly implements only the handlers (src/core/handlers/image_copy_capture.rs)
+       and the offscreen capture (src/core/render.rs::capture_output)
+
+David Hoskins — "Hash without Sine" (https://www.shadertoy.com/view/4djSRW)
+  License: MIT
+  Copied:
+    src/core/render/shaders/blur_main.frag      <- poly_hash12()
+    src/core/render/shaders/include/noise.glsl  <- poly_hash12() / poly_noise()

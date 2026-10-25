@@ -1,0 +1,22 @@
+[package]
+name = "capture-bench"
+description = "Continuous-capture stress client for Poly (ext-image-copy-capture-v1)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "poly-capture-bench"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap = { version = "4.6.7", features = ["derive"] }
+# `wayland-protocols` only exports `ext/image_capture_source` and
+# `ext/image_copy_capture` behind the `staging` feature, and the generated
+# client code needs `client`. This is why the tool is its own crate instead of
+# a `poly` dev-dependency: it must not drag these features into the compositor.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
