@@ -1,7 +1,8 @@
 # Building Poly
 
 Poly is a Linux Wayland compositor. This guide covers building and running it
-from a source checkout. Distribution packaging, installers, service units and
+from a source checkout. To install the built binary for regular use, see
+[installing.md](installing.md). Distribution packaging, service units and
 desktop integration are intentionally out of scope.
 
 For configuration, see [config.md](config.md). For the runtime control socket,
@@ -111,7 +112,8 @@ cargo build --release --locked
 
 The release binary is written to `target/release/poly`. The release profile uses
 thin LTO and keeps line tables for backtraces, so the first release build can
-take longer than a debug build.
+take longer than a debug build. To copy the binary to a user or system location,
+see [installing.md](installing.md).
 
 `--locked` makes Cargo use the committed `Cargo.lock`. This matters because
 Smithay and `smithay-drm-extras` are pinned to a fixed Git revision. The first

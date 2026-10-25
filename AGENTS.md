@@ -19,7 +19,8 @@ keep them stable when editing this file.
   `docs/config.md` must stay in sync with both.
 - Some old source comments cite `docs/plan.md` for historical design notes.
   That file is not part of the current checkout. The maintained documentation
-  is `docs/config.md`, `docs/ipc.md`, `docs/building.md` and this guide.
+  is `docs/config.md`, `docs/ipc.md`, `docs/building.md`, `docs/installing.md`
+  and this guide.
 
 ## 2. Engineering conventions
 
@@ -234,7 +235,8 @@ src/main.rs, cli.rs
 
 Rust 1.87 or newer and the Linux development libraries required by Smithay are
 needed; [docs/building.md](docs/building.md) has the full prerequisite list and
-backend notes. From the repository root:
+backend notes, and [docs/installing.md](docs/installing.md) covers user-local
+and system-wide installation. From the repository root:
 
 ```sh
 cargo build
@@ -310,7 +312,7 @@ If code is ported from niri (GPL-3.0-or-later), smallvil (MIT), Hyprland
 ## 7. Before finishing
 
 - [ ] The behavior is implemented in the owning module, not duplicated.
-- [ ] Configuration, IPC and build docs match the code.
+- [ ] Configuration, IPC, build and install docs match the code.
 - [ ] `cargo fmt --all -- --check` passes.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes.
 - [ ] `cargo test --workspace --all-targets` passes.

@@ -5,6 +5,7 @@
 ## Documentation
 
 - [Building from source](docs/building.md)
+- [Installing from source](docs/installing.md)
 - [Configuration reference](docs/config.md)
 - [IPC protocol](docs/ipc.md)
 - [Contributor and coding-agent guide](AGENTS.md)
