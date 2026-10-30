@@ -18,8 +18,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use poly_config::{
-    AnimationSpec, Animations, Config, LayoutContext, LayoutOutput, LayoutPrograms, LayoutRect,
-    LayoutWindow, WindowRule,
+    AnimationSpec, Animations, Config, LayoutContext, LayoutEffects, LayoutOutput, LayoutPrograms,
+    LayoutRect, LayoutWindow, LayoutWorkspace, WindowRule,
 };
 use smithay::backend::renderer::element::texture::TextureBuffer;
 use smithay::backend::renderer::gles::GlesTexture;
@@ -131,6 +131,13 @@ pub struct ClosingWindow {
     /// Bounds of the baked texture (window + border + shadow), in workspace-local
     /// coordinates.
     pub snapshot_rect: Rectangle<i32, Logical>,
+    /// Size of the baked texture in buffer pixels.
+    ///
+    /// The buffer is created with scale 1, so this is also the logical size of
+    /// the source rectangle sampled by the closing render element. Without it,
+    /// the element would sample only the top-left part of the texture (and
+    /// crop instead of scale the window).
+    pub source_size: Size<i32, Logical>,
     /// The baked window content.
     pub buffer: TextureBuffer<GlesTexture>,
     started: Instant,
@@ -148,6 +155,7 @@ impl ClosingWindow {
         fullscreen: bool,
         window_rect: Rectangle<i32, Logical>,
         snapshot_rect: Rectangle<i32, Logical>,
+        source_size: Size<i32, Logical>,
         buffer: TextureBuffer<GlesTexture>,
         spec: AnimationSpec,
     ) -> Self {
@@ -158,6 +166,7 @@ impl ClosingWindow {
             fullscreen,
             window_rect,
             snapshot_rect,
+            source_size,
             buffer,
             started: Instant::now(),
             spec,
@@ -197,6 +206,11 @@ impl ClosingWindow {
 /// the keyboard when the workspace was left, so coming back restores it.
 #[derive(Debug, Default)]
 struct Workspace {
+    /// Stable id handed to Lua as `ctx.workspace.id` (0 until assigned).
+    ///
+    /// Ids follow a workspace when it moves in the stack, so a layout can keep
+    /// per-workspace state across `move-workspace-up`/`-down`.
+    id: u64,
     tiled: Vec<u64>,
     floating: Vec<u64>,
     layout: String,
@@ -206,6 +220,7 @@ struct Workspace {
 impl Workspace {
     fn with_layout(name: String) -> Self {
         return Self {
+            id: 0,
             tiled: Vec::new(),
             floating: Vec::new(),
             layout: name,
@@ -523,6 +538,9 @@ pub struct LayoutManager {
     outputs: HashMap<smithay::output::Output, OutputLayout>,
     hooks: HashMap<WlSurface, HookId>,
     next_id: u64,
+    /// Next id for a workspace. Ids are assigned lazily because workspaces are
+    /// created in code that only borrows an [`OutputLayout`].
+    next_workspace_id: u64,
     programs: Option<LayoutPrograms>,
     layout_names: Vec<String>,
     default_layout: String,
@@ -563,6 +581,7 @@ impl LayoutManager {
             outputs: HashMap::new(),
             hooks: HashMap::new(),
             next_id: 1,
+            next_workspace_id: 1,
             programs,
             layout_names: config
                 .layouts
@@ -664,6 +683,27 @@ impl LayoutManager {
             .iter()
             .position(|workspace| return workspace.contains(id))?;
         return Some((output, index));
+    }
+
+    /// The tiled and floating window ids of workspace `index` on `output`.
+    ///
+    /// Used by the focus fallback after a window disappears: it must only
+    /// consider windows on the workspace the closed window lived on.
+    pub(crate) fn workspace_ids(
+        &self,
+        output: &smithay::output::Output,
+        index: usize,
+    ) -> Option<HashSet<u64>> {
+        let layout = self.outputs.get(output)?;
+        let workspace = layout.workspaces.get(index)?;
+        return Some(
+            workspace
+                .tiled
+                .iter()
+                .chain(workspace.floating.iter())
+                .copied()
+                .collect(),
+        );
     }
 
     /// The workspace stack of `output`, projected for drawing at `now`.
@@ -907,6 +947,27 @@ impl LayoutManager {
         );
     }
 
+    /// Give every workspace created since the last call a stable id.
+    fn assign_workspace_ids(&mut self) {
+        let next = &mut self.next_workspace_id;
+        for layout in self.outputs.values_mut() {
+            for workspace in &mut layout.workspaces {
+                if workspace.id == 0 {
+                    workspace.id = *next;
+                    *next = next.wrapping_add(1).max(1);
+                }
+            }
+        }
+    }
+
+    /// The layout name of the active workspace on `output`.
+    pub fn layout_name(&self, output: &smithay::output::Output) -> Option<&str> {
+        return self
+            .outputs
+            .get(output)
+            .map(|layout| return layout.ws().layout.as_str());
+    }
+
     /// Register a window as it maps. Returns its stable id.
     pub fn map_window(state: &mut State, window: &Window, root: &WlSurface) -> u64 {
         let identity = window_title_and_app_id(window);
@@ -935,10 +996,34 @@ impl LayoutManager {
             })
         };
         let output_name = output.as_ref().map(|output| return output.name());
+        ensure_all_outputs(&mut state.core.layout, &outputs);
+        state.core.layout.assign_workspace_ids();
+        let id = state.core.layout.next_id;
+        state.core.layout.next_id = state.core.layout.next_id.wrapping_add(1).max(1);
+
+        // A Lua layout may decide where a new tiled window belongs (niri's
+        // `insert` hook). The hook sees the workspace without the new window
+        // and returns a 1-based position; the compositor keeps the order.
+        let insert_at = if floating {
+            None
+        } else {
+            output.as_ref().and_then(|output| {
+                let (min_size, max_size) = size_constraints(window);
+                let entry = LayoutWindow {
+                    id,
+                    app_id: app_id.map(str::to_owned),
+                    title: title.map(str::to_owned),
+                    // The window has not been focused yet at insert time.
+                    focused: false,
+                    rect: to_layout_rect(rect),
+                    min_size,
+                    max_size,
+                };
+                return Self::insert_position(state, output, &entry);
+            })
+        };
+
         let manager = &mut state.core.layout;
-        ensure_all_outputs(manager, &outputs);
-        let id = manager.next_id;
-        manager.next_id = manager.next_id.wrapping_add(1).max(1);
         let managed = ManagedWindow {
             id,
             window: window.clone(),
@@ -967,7 +1052,11 @@ impl LayoutManager {
                 if floating {
                     layout.ws_mut().floating.push(id);
                 } else {
-                    layout.ws_mut().tiled.push(id);
+                    let workspace = layout.ws_mut();
+                    let index = insert_at
+                        .unwrap_or(workspace.tiled.len())
+                        .min(workspace.tiled.len());
+                    workspace.tiled.insert(index, id);
                 }
             }
         }
@@ -1154,6 +1243,7 @@ impl LayoutManager {
         }
         let outputs_all = state.core.space.outputs().cloned().collect::<Vec<_>>();
         ensure_all_outputs(&mut state.core.layout, &outputs_all);
+        state.core.layout.assign_workspace_ids();
 
         let mut desired: HashMap<u64, Rectangle<i32, Logical>> = HashMap::new();
         let focused = focused_id(state);
@@ -1172,72 +1262,18 @@ impl LayoutManager {
                 .map(|layout| return layout.workspaces.len())
                 .unwrap_or(0);
             for index in 0..count {
-                let (tiled, floating, layout_name) = {
-                    let Some(layout) = state.core.layout.outputs.get(output) else {
-                        continue;
-                    };
-                    let Some(workspace) = layout.workspaces.get(index) else {
-                        continue;
-                    };
-                    (
-                        workspace.tiled.clone(),
-                        workspace.floating.clone(),
-                        workspace.layout.clone(),
-                    )
-                };
-                let fullscreen = tiled
-                    .iter()
-                    .chain(floating.iter())
-                    .filter_map(|id| {
-                        let window = state.core.layout.windows.get(id)?;
-                        return (window.fullscreen == Some(FullscreenMode::Fullscreen))
-                            .then_some(*id);
-                    })
-                    .collect::<Vec<_>>();
-
-                let mut context_windows = Vec::new();
-                for id in tiled.iter().copied() {
-                    let Some(window) = state.core.layout.windows.get(&id) else {
-                        continue;
-                    };
-                    if window.fullscreen == Some(FullscreenMode::Fullscreen) {
-                        continue;
-                    }
-                    let identity = window_title_and_app_id(&window.window);
-                    let (app_id, title) = identity.as_pair();
-                    let (min_size, max_size) = size_constraints(&window.window);
-                    context_windows.push(LayoutWindow {
-                        id,
-                        app_id: app_id.map(str::to_owned),
-                        title: title.map(str::to_owned),
-                        focused: focused == Some(id),
-                        rect: to_layout_rect(window.rect_at(now)),
-                        min_size,
-                        max_size,
-                    });
-                }
-                let context = LayoutContext {
-                    output: LayoutOutput {
-                        name: output.name(),
-                        width: area.size.w,
-                        height: area.size.h,
-                        scale: output.current_scale().fractional_scale(),
-                        work_area: to_layout_rect(area),
-                    },
-                    windows: context_windows,
-                    floating: floating
-                        .iter()
-                        .copied()
-                        .filter(|id| return !fullscreen.contains(id))
-                        .collect(),
-                    fullscreen: fullscreen.clone(),
-                    focused,
+                let Some((context, tiled, floating, layout_name)) =
+                    Self::workspace_context(state, output, index, area, now, focused)
+                else {
+                    continue;
                 };
 
                 let mut lua_result = None;
                 let mut lua_error = None;
-                if state.core.layout.has_layout(&layout_name) {
-                    if let Some(programs) = &state.core.layout.programs {
+                // The built-in `columns` stack is not a `LayoutProgram`: only
+                // ask the Lua bridge when the workspace really names one.
+                if let Some(programs) = &state.core.layout.programs {
+                    if programs.has(&layout_name) {
                         match programs.arrange(&layout_name, &context) {
                             Ok(result) => lua_result = Some(result),
                             Err(err) => lua_error = Some(err.to_string()),
@@ -1269,8 +1305,12 @@ impl LayoutManager {
                     }
                 }
 
-                let fallback =
-                    column_layout(&tiled, &fullscreen, area, state.core.config.general.gap);
+                let fallback = column_layout(
+                    &tiled,
+                    &context.fullscreen,
+                    area,
+                    state.core.config.general.gap,
+                );
                 for id in tiled.iter().copied().chain(floating.iter().copied()) {
                     let Some(window) = state.core.layout.windows.get(&id) else {
                         continue;
@@ -1312,6 +1352,110 @@ impl LayoutManager {
         } else {
             sync_space(state);
         }
+    }
+
+    /// Ask the active layout of a workspace where a new window belongs.
+    ///
+    /// Returns a 0-based tiled insertion index; `None` means append, which is
+    /// also what the built-in layout and layouts without an `insert` hook do.
+    fn insert_position(
+        state: &State,
+        output: &smithay::output::Output,
+        entry: &LayoutWindow,
+    ) -> Option<usize> {
+        let area = Self::layout_area(state, output)?;
+        let index = state.core.layout.active_workspace(output);
+        let now = Instant::now();
+        let focused = focused_id(state);
+        let (context, _, _, layout_name) =
+            Self::workspace_context(state, output, index, area, now, focused)?;
+        let programs = state.core.layout.programs.as_ref()?;
+        // The built-in column stack is not a `LayoutProgram`, so it has no
+        // `insert` hook and must not reach the error path below.
+        if !programs.has(&layout_name) {
+            return None;
+        }
+        return match programs.insert(&layout_name, &context, entry) {
+            Ok(index) => index,
+            Err(err) => {
+                warn!("layout {layout_name:?} insert() failed: {err}");
+                None
+            }
+        };
+    }
+
+    /// Build the Lua context for one workspace.
+    ///
+    /// Returns the context plus the workspace's tiled and floating lists and
+    /// its layout name, which the arrange loop needs after the call.
+    fn workspace_context(
+        state: &State,
+        output: &smithay::output::Output,
+        index: usize,
+        area: Rectangle<i32, Logical>,
+        now: Instant,
+        focused: Option<u64>,
+    ) -> Option<(LayoutContext, Vec<u64>, Vec<u64>, String)> {
+        let layout = state.core.layout.outputs.get(output)?;
+        let workspace = layout.workspaces.get(index)?;
+        let tiled = workspace.tiled.clone();
+        let floating = workspace.floating.clone();
+        let layout_name = workspace.layout.clone();
+        let workspace_id = workspace.id;
+
+        let fullscreen = tiled
+            .iter()
+            .chain(floating.iter())
+            .filter_map(|id| {
+                let window = state.core.layout.windows.get(id)?;
+                return (window.fullscreen == Some(FullscreenMode::Fullscreen)).then_some(*id);
+            })
+            .collect::<Vec<_>>();
+
+        let mut context_windows = Vec::new();
+        for id in tiled.iter().copied() {
+            let Some(window) = state.core.layout.windows.get(&id) else {
+                continue;
+            };
+            if window.fullscreen == Some(FullscreenMode::Fullscreen) {
+                continue;
+            }
+            let identity = window_title_and_app_id(&window.window);
+            let (app_id, title) = identity.as_pair();
+            let (min_size, max_size) = size_constraints(&window.window);
+            context_windows.push(LayoutWindow {
+                id,
+                app_id: app_id.map(str::to_owned),
+                title: title.map(str::to_owned),
+                focused: focused == Some(id),
+                rect: to_layout_rect(window.rect_at(now)),
+                min_size,
+                max_size,
+            });
+        }
+
+        let context = LayoutContext {
+            output: LayoutOutput {
+                name: output.name(),
+                width: area.size.w,
+                height: area.size.h,
+                scale: output.current_scale().fractional_scale(),
+                work_area: to_layout_rect(area),
+            },
+            workspace: LayoutWorkspace {
+                id: workspace_id,
+                index: index + 1,
+            },
+            windows: context_windows,
+            floating: floating
+                .iter()
+                .copied()
+                .filter(|id| return !fullscreen.contains(id))
+                .collect(),
+            fullscreen,
+            focused,
+        };
+        return Some((context, tiled, floating, layout_name));
     }
 
     /// Toggle the focused window between tiled and floating (`docs/plan.md` §9.3).
@@ -1508,6 +1652,132 @@ impl LayoutManager {
         }
         Self::relayout(state);
         state.core.queue_redraw_all();
+    }
+
+    /// Invoke an action declared by the active workspace's layout.
+    ///
+    /// Layout keybindings and IPC both land here. The handler runs against the
+    /// same per-layout Lua state as `arrange`, and its effects are applied by
+    /// the compositor rather than by Lua directly.
+    pub fn run_layout_action(state: &mut State, name: &str, args: &[String]) {
+        let Some(output) = Self::active_output(state) else {
+            warn!("layout action {name:?}: there is no output");
+            return;
+        };
+        state.core.layout.ensure_output(&output);
+        state.core.layout.assign_workspace_ids();
+        let index = state.core.layout.active_workspace(&output);
+        let Some(area) = Self::layout_area(state, &output) else {
+            return;
+        };
+        let now = Instant::now();
+        let focused = focused_id(state);
+        let Some((context, _, _, layout_name)) =
+            Self::workspace_context(state, &output, index, area, now, focused)
+        else {
+            return;
+        };
+        let Some(programs) = state.core.layout.programs.as_ref() else {
+            warn!("layout action {name:?}: no Lua layouts are configured");
+            return;
+        };
+        if !programs.has(&layout_name) {
+            warn!(
+                "layout action {name:?}: the active workspace uses the built-in {layout_name:?} layout, which has no actions"
+            );
+            return;
+        }
+        let result = programs.invoke_action(&layout_name, name, &context, args);
+        let mut effects = match result {
+            Ok(effects) => effects,
+            Err(err) => {
+                warn!("layout action {name:?} on {layout_name:?} failed: {err}");
+                return;
+            }
+        };
+        if state
+            .core
+            .layout
+            .programs
+            .as_ref()
+            .is_some_and(|programs| return programs.take_relayout())
+        {
+            effects.relayout = true;
+        }
+        Self::apply_layout_effects(state, &output, index, effects);
+    }
+
+    /// Apply the effects a layout action returned.
+    fn apply_layout_effects(
+        state: &mut State,
+        output: &smithay::output::Output,
+        index: usize,
+        effects: LayoutEffects,
+    ) {
+        let mut changed = false;
+
+        if let Some(order) = effects.order {
+            let result = (|| -> Result<(), String> {
+                let Some(layout) = state.core.layout.outputs.get_mut(output) else {
+                    return Err(format!("output {} has no workspace stack", output.name()));
+                };
+                let Some(workspace) = layout.workspaces.get_mut(index) else {
+                    return Err(format!("output {} has no workspace {index}", output.name()));
+                };
+                let current = workspace.tiled.iter().copied().collect::<HashSet<_>>();
+                let mut seen = HashSet::new();
+                let valid = order.len() == current.len()
+                    && order
+                        .iter()
+                        .all(|id| return current.contains(id) && seen.insert(*id));
+                if !valid {
+                    return Err(format!(
+                        "layout action returned an order that is not a permutation of workspace {index} on {}",
+                        output.name()
+                    ));
+                }
+                workspace.tiled = order;
+                return Ok(());
+            })();
+            match result {
+                Ok(()) => changed = true,
+                Err(err) => warn!("{err}"),
+            }
+        }
+
+        let mut relaid_out = false;
+        if let Some(id) = effects.focus {
+            let belongs =
+                state
+                    .core
+                    .layout
+                    .workspace_of(id)
+                    .is_some_and(|(window_output, workspace)| {
+                        return window_output == *output && workspace == index;
+                    });
+            if !belongs {
+                warn!(
+                    "layout action focused window {id}, which is not on workspace {index} of {}",
+                    output.name()
+                );
+            } else if Self::focus_window_id(state, id) {
+                changed = true;
+                relaid_out = true;
+            }
+        }
+        if let Some(workspace) = effects.switch_workspace {
+            let current = state.core.layout.active_workspace(output) + 1;
+            if workspace != current {
+                Self::focus_workspace(state, workspace);
+                changed = true;
+                relaid_out = true;
+            }
+        }
+
+        if !relaid_out && (effects.relayout || changed) {
+            Self::relayout(state);
+            state.core.queue_redraw_all();
+        }
     }
 
     /// Focus the next or previous window in the output's stacking order.
@@ -1987,6 +2257,23 @@ impl LayoutManager {
     /// Called once per event-loop iteration.
     pub fn tick(state: &mut State) {
         let now = Instant::now();
+        // Layout handlers call `poly.layout.relayout()` when they changed state
+        // that only `arrange` can see. Consume the request here instead of
+        // arranging directly from Lua. Clear it again afterwards: an `arrange`
+        // that calls `relayout()` is already laying out and must not queue a
+        // new frame forever.
+        let relayout_requested = state
+            .core
+            .layout
+            .programs
+            .as_ref()
+            .is_some_and(|programs| return programs.take_relayout());
+        if relayout_requested {
+            Self::relayout(state);
+            if let Some(programs) = state.core.layout.programs.as_ref() {
+                programs.take_relayout();
+            }
+        }
         notify_released_transactions(state);
         let completed = state
             .core

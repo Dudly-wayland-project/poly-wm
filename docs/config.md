@@ -686,6 +686,9 @@ layouts = {
 | `arrange` | Required. The function called whenever geometry is needed. |
 | `setup` | Optional. Called once when the configuration loads, with the `poly` table. |
 | `handles_fullscreen` | When true, the layout also positions compositor-managed fullscreen windows. Otherwise fullscreen windows fill their output. |
+| `actions` | Optional. Table of `name = function(ctx, args) … end`, described below. |
+| `keybinds` | Optional. Bindings that only apply while a workspace uses this layout. |
+| `insert` | Optional. Hook deciding where a newly mapped tiled window goes. |
 
 Layouts are per workspace. `set-layout` and `cycle-layout` change the active
 workspace of the focused output. A layout function:
@@ -711,11 +714,97 @@ another arrangement by calling `poly.layout.relayout()`.
 | `ctx.output.width`, `ctx.output.height` | Usable layout area in logical pixels; equal to `work_area.w` and `work_area.h`. |
 | `ctx.output.scale` | Fractional scale. |
 | `ctx.output.work_area` | `{ x, y, w, h }` after layer-shell exclusive zones and `general.gap`. |
+| `ctx.workspace.id` | Layout-private workspace id. It follows the workspace when the stack is reordered; like window ids, it is only valid until the compositor restarts. |
+| `ctx.workspace.index` | 1-based position in the output's vertical workspace stack. |
 | `ctx.windows` | Tiled windows in layout order, excluding compositor-managed fullscreen windows; described below. |
 | `ctx.floating` | Array of floating window ids, bottom to top, excluding fullscreen windows. |
 | `ctx.fullscreen` | Array of fullscreen window ids. |
 | `ctx.focused` | Focused window id, or nil. |
 | `ctx.options` | The merged `layout_options` for this output. |
+
+### Layout actions and keybindings
+
+A layout can expose its own action vocabulary. The handler receives the same
+context as `arrange` plus a 1-based array of string arguments, and returns a
+table of effects. It must not change window order or focus directly; returning
+effects keeps the Rust window model authoritative.
+
+```lua
+layouts = {
+    scrolling = {
+        arrange = function(ctx)
+            -- use poly.state[ctx.workspace.id] for per-workspace state
+        end,
+        actions = {
+            ["focus-left"] = function(ctx)
+                -- Pick the window to focus (layout-specific policy).
+                local target = ctx.windows[1] and ctx.windows[1].id
+                return { focus = target }
+            end,
+            ["move-column-left"] = function(ctx, args)
+                -- Build the complete new tiled order.
+                local order = {}
+                for index, window in ipairs(ctx.windows) do
+                    order[index] = window.id
+                end
+                return { order = order, relayout = true }
+            end,
+        },
+        keybinds = {
+            ["Mod+H"] = "focus-left",
+            ["Mod+Shift+H"] = { "move-column-left" },
+            ["Mod+Comma"] = { action = "focus-left", key_repeat = false },
+        },
+    },
+}
+default_layout = "scrolling"
+```
+
+The supported effects are:
+
+| Field | Description |
+| --- | --- |
+| `focus` | Window id to focus. It must belong to the action's workspace. |
+| `order` | Complete new order of the workspace's tiled window ids. It must be a permutation of the current ids; membership is owned by the compositor. |
+| `switch_workspace` | 1-based workspace number on the action's output to switch to. |
+| `relayout` | `true` asks for another `arrange` call even when no other effect changed. |
+
+Unknown fields are ignored, so a layout can keep bookkeeping in the same table.
+Returning nothing is allowed.
+
+`keybinds` uses the same key spellings as the top-level `keybinds` table.
+Bindings from the layout of the active workspace are checked before the global
+bindings, so a layout can override `Mod+H` without touching the rest of the
+configuration. A layout keybinding may only invoke an action declared in that
+same layout's `actions` table; a missing name is a configuration error. Global
+bindings and IPC can invoke one explicitly:
+
+```lua
+keybinds = {
+    ["Mod+E"] = { layout_action = "focus-left" },
+    ["Mod+Shift+E"] = { layout_action = { "move-column-left" } },
+}
+```
+
+`insert` is called when a tiled window maps, before it joins the workspace. It
+receives the workspace context without the new window and a window table with
+the same fields as `ctx.windows` entries. Return a 1-based position in the
+tiled order, or nothing to append:
+
+```lua
+insert = function(ctx, window)
+    return #ctx.windows + 1
+end
+```
+
+The hook only runs for named Lua layouts; the built-in `columns` layout always
+appends.
+
+[`docs/examples/scrolling.lua`](examples/scrolling.lua) is a complete
+one-window-per-column scrolling layout built from these pieces: per-workspace
+width and viewport state, focused-column following, column reordering and
+resizing. It is the reference for extending the same state to multi-window
+columns and consume/expel.
 
 Each entry in `ctx.windows` has:
 

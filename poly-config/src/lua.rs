@@ -1254,6 +1254,7 @@ fn parse_bind(value: &Value, path: &str, errors: &mut Errors) -> Option<(Action,
                 "focus_workspace",
                 "focus_window",
                 "move_window_to_workspace",
+                "layout_action",
             ];
             lx::warn_unknown(table, path, KEYS, errors);
             let repeat = lx::boolean(table, "key_repeat", path, errors)
@@ -1321,6 +1322,7 @@ fn parse_inline_action(table: &Table, path: &str, errors: &mut Errors) -> Option
         "focus_workspace",
         "focus_window",
         "move_window_to_workspace",
+        "layout_action",
     ];
 
     let mut action = None;
@@ -1341,6 +1343,7 @@ fn parse_inline_action(table: &Table, path: &str, errors: &mut Errors) -> Option
             "set_layout" => parse_set_layout(&value, &field_path, errors),
             "focus_workspace" => parse_workspace_index(&value, &field_path, errors, true),
             "focus_window" => parse_window_id(&value, &field_path, errors),
+            "layout_action" => parse_layout_action(&value, &field_path, errors),
             _ => parse_workspace_index(&value, &field_path, errors, false),
         };
     }
@@ -1385,6 +1388,78 @@ fn parse_spawn_shell(value: &Value, path: &str, errors: &mut Errors) -> Option<A
             None
         }
     };
+}
+
+/// `{ layout_action = "focus-left" }` or
+/// `{ layout_action = { "resize-column", "0.5" } }`.
+fn parse_layout_action(value: &Value, path: &str, errors: &mut Errors) -> Option<Action> {
+    match value {
+        Value::String(name) => match name.to_str() {
+            Ok(name) if !name.is_empty() => Some(Action::LayoutAction {
+                name: name.to_owned(),
+                args: Vec::new(),
+            }),
+            Ok(_) => {
+                errors.error(path, "layout action names must not be empty");
+                None
+            }
+            Err(_) => {
+                errors.error(path, "string is not valid UTF-8");
+                None
+            }
+        },
+        Value::Table(table) => {
+            let mut values = Vec::new();
+            for (index, item) in table.clone().sequence_values::<Value>().enumerate() {
+                let item_path = crate::error::path_index(path, index + 1);
+                let item = match item {
+                    Ok(item) => item,
+                    Err(err) => {
+                        errors.error(item_path, err.to_string());
+                        return None;
+                    }
+                };
+                let Value::String(item) = item else {
+                    errors.error(
+                        item_path,
+                        format!(
+                            "expected a layout action name or argument string, got {}",
+                            lx::type_name(&item)
+                        ),
+                    );
+                    return None;
+                };
+                match item.to_str() {
+                    Ok(item) => values.push(item.to_owned()),
+                    Err(_) => {
+                        errors.error(item_path, "string is not valid UTF-8");
+                        return None;
+                    }
+                }
+            }
+            let Some(name) = values.first().cloned() else {
+                errors.error(
+                    path,
+                    "expected a layout action name, e.g. { layout_action = \"focus-left\" }",
+                );
+                return None;
+            };
+            Some(Action::LayoutAction {
+                name,
+                args: values.into_iter().skip(1).collect(),
+            })
+        }
+        other => {
+            errors.error(
+                path,
+                format!(
+                    "expected a layout action name or list, got {}",
+                    lx::type_name(other)
+                ),
+            );
+            None
+        }
+    }
 }
 
 fn parse_set_layout(value: &Value, path: &str, errors: &mut Errors) -> Option<Action> {
@@ -1744,6 +1819,47 @@ mod tests {
         };
     }
 
+    /// A minimal context for calling layout actions directly in tests.
+    fn layout_context() -> crate::layout::LayoutContext {
+        return crate::layout::LayoutContext {
+            output: crate::layout::LayoutOutput {
+                name: "WL-1".into(),
+                width: 1280,
+                height: 800,
+                scale: 1.0,
+                work_area: crate::layout::LayoutRect {
+                    x: 0,
+                    y: 0,
+                    w: 1280,
+                    h: 800,
+                },
+            },
+            workspace: crate::layout::LayoutWorkspace { id: 7, index: 1 },
+            windows: Vec::new(),
+            floating: Vec::new(),
+            fullscreen: Vec::new(),
+            focused: None,
+        };
+    }
+
+    /// A tiled window entry for calling the `insert` hook in tests.
+    fn layout_entry() -> crate::layout::LayoutWindow {
+        return crate::layout::LayoutWindow {
+            id: 1,
+            app_id: None,
+            title: None,
+            focused: false,
+            rect: crate::layout::LayoutRect {
+                x: 0,
+                y: 0,
+                w: 100,
+                h: 100,
+            },
+            min_size: (0, 0),
+            max_size: (0, 0),
+        };
+    }
+
     /// All error messages as `path: message` strings, for assertions.
     fn error_text(err: &ConfigError) -> String {
         return err
@@ -2030,6 +2146,8 @@ mod tests {
                     ["Mod+5"] = { focus_window = 5 },
                     ["Mod+4"] = { move_window_to_workspace = 4 },
                     ["Mod+D"] = { set_layout = "dwindle" },
+                    ["Mod+E"] = { layout_action = "focus-left" },
+                    ["Mod+Shift+E"] = { layout_action = { "resize-column", "0.5" } },
                 },
             }
             "#,
@@ -2052,6 +2170,160 @@ mod tests {
                 name: "dwindle".into(),
             }
         );
+        assert_eq!(
+            action("Mod+E"),
+            Action::LayoutAction {
+                name: "focus-left".into(),
+                args: Vec::new(),
+            }
+        );
+        assert_eq!(
+            action("Mod+Shift+E"),
+            Action::LayoutAction {
+                name: "resize-column".into(),
+                args: vec!["0.5".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_layout_actions_and_keybinds() {
+        let (config, result) = expect_config(
+            "layout-actions",
+            r#"
+            return {
+                layouts = {
+                    scrolling = {
+                        arrange = function(ctx) return {} end,
+                        actions = {
+                            ["focus-left"] = function(ctx) return { focus = 1 } end,
+                            ["resize-column"] = function(ctx, args)
+                                return { relayout = true, width = args[1] }
+                            end,
+                            ["bad-effects"] = function(ctx)
+                                return { focus = "not a window id" }
+                            end,
+                        },
+                        keybinds = {
+                            ["Mod+H"] = "focus-left",
+                            ["Mod+Shift+H"] = {
+                                action = "resize-column",
+                                args = { "0.5" },
+                                key_repeat = false,
+                            },
+                        },
+                        insert = function(ctx, window) return 1 end,
+                    },
+                },
+                default_layout = "scrolling",
+            }
+            "#,
+        );
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        assert_eq!(config.layouts.len(), 1);
+        let layout = &config.layouts[0];
+        assert_eq!(layout.name, "scrolling");
+        let bind = |name: &str| -> &Keybind {
+            return layout
+                .keybinds
+                .iter()
+                .find(|bind| return bind.key == name.parse::<Key>().unwrap())
+                .unwrap_or_else(|| panic!("no binding for {name}"));
+        };
+        assert_eq!(
+            bind("Mod+H").action,
+            Action::LayoutAction {
+                name: "focus-left".into(),
+                args: Vec::new(),
+            }
+        );
+        assert!(bind("Mod+H").repeat);
+        assert_eq!(
+            bind("Mod+Shift+H").action,
+            Action::LayoutAction {
+                name: "resize-column".into(),
+                args: vec!["0.5".into()],
+            }
+        );
+        assert!(!bind("Mod+Shift+H").repeat);
+
+        let programs = result
+            .layout_programs
+            .as_ref()
+            .expect("the layout programs should stay alive");
+        let context = layout_context();
+        let effects = programs
+            .invoke_action("scrolling", "focus-left", &context, &[])
+            .unwrap();
+        assert_eq!(effects.focus, Some(1));
+        let effects = programs
+            .invoke_action("scrolling", "resize-column", &context, &["0.5".into()])
+            .unwrap();
+        assert!(effects.relayout);
+        assert!(
+            programs
+                .invoke_action("scrolling", "missing", &context, &[])
+                .is_err()
+        );
+        assert!(
+            programs
+                .invoke_action("scrolling", "bad-effects", &context, &[])
+                .is_err()
+        );
+
+        assert_eq!(
+            programs
+                .insert("scrolling", &context, &layout_entry())
+                .unwrap(),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn layout_insert_must_return_a_position() {
+        let (_config, result) = expect_config(
+            "layout-bad-insert",
+            r#"
+            return {
+                layouts = {
+                    scrolling = {
+                        arrange = function(ctx) return {} end,
+                        insert = function(ctx, window) return 0 end,
+                    },
+                },
+            }
+            "#,
+        );
+        let programs = result
+            .layout_programs
+            .as_ref()
+            .expect("the layout programs should stay alive");
+        assert!(
+            programs
+                .insert("scrolling", &layout_context(), &layout_entry())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn layout_keybinds_must_name_a_declared_action() {
+        let err = expect_errors(
+            "layout-unknown-action",
+            r#"
+            return {
+                layouts = {
+                    scrolling = {
+                        arrange = function(ctx) return {} end,
+                        actions = {},
+                        keybinds = { ["Mod+H"] = "focus-left" },
+                    },
+                },
+            }
+            "#,
+        );
+        let text = error_text(&err);
+        assert!(text.contains("layouts.scrolling.keybinds"), "{text}");
+        assert!(text.contains("no action named"), "{text}");
     }
 
     #[test]

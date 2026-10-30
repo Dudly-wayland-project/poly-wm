@@ -224,7 +224,6 @@ fn on_keyboard<B: InputBackend>(state: &mut State, event: &B::KeyboardKeyEvent) 
         state.core.stop_bind_repeat();
     }
 
-    let mod_key = state.core.mod_key;
     let locked = state.core.is_locked();
     let shortcuts_inhibited = keyboard.current_focus().is_some_and(|surface| {
         return state.shortcuts_inhibited_for(&surface);
@@ -285,13 +284,7 @@ fn on_keyboard<B: InputBackend>(state: &mut State, event: &B::KeyboardKeyEvent) 
                 return FilterResult::Intercept(());
             }
 
-            let bind = find_bind(
-                &state.core.config.keybinds,
-                mod_key,
-                Trigger::Keysym(raw),
-                *modifiers,
-            )
-            .cloned();
+            let bind = find_active_bind(state, Trigger::Keysym(raw), *modifiers).cloned();
             let Some(bind) = bind else {
                 // niri's hardcoded overview keys: with no configured binding
                 // matching, the unmodified arrows page through the overview and
@@ -516,10 +509,7 @@ fn on_pointer_axis<B: InputBackend>(state: &mut State, event: &B::PointerAxisEve
     // instead of scrolling the focused client. The accumulators carry the
     // fractional amounts of high-resolution wheels and touchpads.
     if let Some((modifiers, true)) = modifiers.map(|modifiers| {
-        return (
-            modifiers,
-            wheel_binds_armed(&state.core.config.keybinds, state.core.mod_key, modifiers),
-        );
+        return (modifiers, active_wheel_binds_armed(state, modifiers));
     }) {
         let horizontal = event.amount_v120(Axis::Horizontal).unwrap_or(0.0);
         let vertical = event.amount_v120(Axis::Vertical).unwrap_or(0.0);
@@ -859,15 +849,24 @@ fn trigger_from_button(button: MouseButton) -> Option<Trigger> {
 /// The wheel triggers are looked up through [`find_bind`] so that the `Mod`
 /// resolution matches whatever the actual dispatch would do.
 fn wheel_binds_armed(keybinds: &[Keybind], mod_key: ModKey, modifiers: ModifiersState) -> bool {
-    return [
-        Trigger::WheelScrollUp,
-        Trigger::WheelScrollDown,
-        Trigger::WheelScrollLeft,
-        Trigger::WheelScrollRight,
-    ]
-    .into_iter()
-    .any(|trigger| return find_bind(keybinds, mod_key, trigger, modifiers).is_some());
+    return WHEEL_TRIGGERS
+        .into_iter()
+        .any(|trigger| return find_bind(keybinds, mod_key, trigger, modifiers).is_some());
 }
+
+/// Whether either the active layout or the global bindings would fire for a
+/// wheel tick with these modifiers.
+fn active_wheel_binds_armed(state: &State, modifiers: ModifiersState) -> bool {
+    return wheel_binds_armed(&state.core.config.keybinds, state.core.mod_key, modifiers)
+        || wheel_binds_armed(active_layout_keybinds(state), state.core.mod_key, modifiers);
+}
+
+const WHEEL_TRIGGERS: [Trigger; 4] = [
+    Trigger::WheelScrollUp,
+    Trigger::WheelScrollDown,
+    Trigger::WheelScrollLeft,
+    Trigger::WheelScrollRight,
+];
 
 /// Fire the wheel binding for each completed tick, if one matches.
 fn dispatch_wheel_ticks(
@@ -895,13 +894,7 @@ fn dispatch_wheel_ticks(
             continue;
         }
         let trigger = if ticks > 0 { positive } else { negative };
-        let bind = find_bind(
-            &state.core.config.keybinds,
-            state.core.mod_key,
-            trigger,
-            modifiers,
-        )
-        .cloned();
+        let bind = find_active_bind(state, trigger, modifiers).cloned();
         let Some(bind) = bind else {
             continue;
         };
@@ -964,6 +957,52 @@ pub fn find_bind(
         .find(|bind| return bind.key.trigger == trigger && bind_matches(bind, mod_key, modifiers));
 }
 
+/// Key bindings scoped to the active workspace's layout.
+fn active_layout_keybinds(state: &State) -> &[Keybind] {
+    let Some(output) = LayoutManager::active_output(state) else {
+        return &[];
+    };
+    let Some(name) = state.core.layout.layout_name(&output) else {
+        return &[];
+    };
+    return state
+        .core
+        .config
+        .layouts
+        .iter()
+        .find(|layout| return layout.name == name)
+        .map(|layout| return layout.keybinds.as_slice())
+        .unwrap_or(&[]);
+}
+
+/// Prefer a layout binding over a global one for the same trigger.
+fn find_preferred_bind<'a>(
+    layout: &'a [Keybind],
+    global: &'a [Keybind],
+    mod_key: ModKey,
+    trigger: Trigger,
+    modifiers: ModifiersState,
+) -> Option<&'a Keybind> {
+    return find_bind(layout, mod_key, trigger, modifiers)
+        .or_else(|| return find_bind(global, mod_key, trigger, modifiers));
+}
+
+/// The binding for this trigger, preferring the active layout's bindings over
+/// the global ones.
+pub fn find_active_bind(
+    state: &State,
+    trigger: Trigger,
+    modifiers: ModifiersState,
+) -> Option<&Keybind> {
+    return find_preferred_bind(
+        active_layout_keybinds(state),
+        &state.core.config.keybinds,
+        state.core.mod_key,
+        trigger,
+        modifiers,
+    );
+}
+
 /// Pointer bindings also match while the `window_drag.axis_lock` modifier is
 /// held: it is not part of the binding, but the drag start must still see the
 /// button press (`docs/plan.md` §9.5). Exact matches win, so a user can still
@@ -973,12 +1012,7 @@ fn find_pointer_bind(
     trigger: Trigger,
     modifiers: ModifiersState,
 ) -> Option<Keybind> {
-    if let Some(bind) = find_bind(
-        &state.core.config.keybinds,
-        state.core.mod_key,
-        trigger,
-        modifiers,
-    ) {
+    if let Some(bind) = find_active_bind(state, trigger, modifiers) {
         return Some(bind.clone());
     }
     let lock = state.core.config.window_drag.axis_lock?;
@@ -989,13 +1023,7 @@ fn find_pointer_bind(
         return None;
     }
     let modifiers = without_modifier(modifiers, lock);
-    return find_bind(
-        &state.core.config.keybinds,
-        state.core.mod_key,
-        trigger,
-        modifiers,
-    )
-    .cloned();
+    return find_active_bind(state, trigger, modifiers).cloned();
 }
 
 fn modifier_held(modifiers: ModifiersState, key: ModKey) -> bool {
@@ -1284,6 +1312,45 @@ mod tests {
         // Keyboard bindings do not arm the wheel handling.
         let keybinds = [keybind("Alt+Q")];
         assert!(!wheel_binds_armed(&keybinds, ModKey::Alt, alt));
+    }
+
+    #[test]
+    fn layout_bindings_win_over_global_bindings() {
+        let mut layout = keybind("Mod+Q");
+        layout.action = Action::LayoutAction {
+            name: "focus-left".into(),
+            args: Vec::new(),
+        };
+        let action = layout.action.clone();
+        let layout_bindings = [layout];
+        let global_bindings = [keybind("Mod+Q")];
+        let modifiers = mods(false, false, true);
+        let trigger = Trigger::Keysym(Keysym::q);
+
+        let bind = find_preferred_bind(
+            &layout_bindings,
+            &global_bindings,
+            ModKey::Super,
+            trigger,
+            modifiers,
+        )
+        .expect("the layout binding should match");
+        assert_eq!(bind.action, action);
+
+        // A trigger neither side covers does nothing.
+        let bind = find_preferred_bind(
+            &layout_bindings,
+            &global_bindings,
+            ModKey::Super,
+            Trigger::Keysym(Keysym::w),
+            modifiers,
+        );
+        assert!(bind.is_none());
+
+        // With no layout binding for the trigger, the global one fires.
+        let bind = find_preferred_bind(&[], &global_bindings, ModKey::Super, trigger, modifiers)
+            .expect("the global binding should match when the layout has none");
+        assert_eq!(bind.action, Action::CloseWindow);
     }
 
     #[test]

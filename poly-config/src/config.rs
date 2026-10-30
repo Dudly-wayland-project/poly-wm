@@ -825,6 +825,11 @@ pub struct LayoutInfo {
     pub name: String,
     /// Whether the layout also positions fullscreen windows.
     pub handles_fullscreen: bool,
+    /// Key bindings that only apply while a workspace uses this layout.
+    ///
+    /// Their actions are [`poly_ipc::Action::LayoutAction`] values, already
+    /// checked against the layout's own `actions` table by the parser.
+    pub keybinds: Vec<Keybind>,
 }
 
 /// `window_rules[i]`: state and appearance applied when a window maps.

@@ -29,7 +29,8 @@ pub use default_config::{DEFAULT_CONFIG, write_default};
 pub use error::{ConfigError, ConfigMessage, LocateError};
 pub use glob::{device_matches, glob_matches};
 pub use layout::{
-    LayoutContext, LayoutError, LayoutOutput, LayoutPrograms, LayoutRect, LayoutWindow,
+    LayoutContext, LayoutEffects, LayoutError, LayoutOutput, LayoutPrograms, LayoutRect,
+    LayoutWindow, LayoutWorkspace,
 };
 pub use locate::{ConfigSource, locate_config};
 pub use lua::{ConfigLoadResult, load, load_file};

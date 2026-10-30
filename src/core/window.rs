@@ -289,6 +289,14 @@ pub fn on_window_destroyed(state: &mut State, root: &WlSurface) {
 
     // The keyboard may be pointing at the window that just died.
     let held_focus = keyboard_focused_on(state, root);
+    // Remember where it was before the layout forgets it. Focus fallback must
+    // stay on that workspace instead of picking whatever window is topmost in
+    // the whole space.
+    let previous_workspace = state
+        .core
+        .layout
+        .by_root(root)
+        .and_then(|managed| return state.core.layout.workspace_of(managed.id));
 
     // The layout must forget the window before `refresh` drops it from the
     // space, otherwise it would keep a dead element in its ordering.
@@ -302,7 +310,7 @@ pub fn on_window_destroyed(state: &mut State, root: &WlSurface) {
     state.core.space.refresh();
 
     if held_focus {
-        focus_next_window(state);
+        focus_next_window(state, previous_workspace);
     }
 
     LayoutManager::relayout(state);
@@ -429,6 +437,7 @@ pub(crate) fn take_closing_snapshot(
         fullscreen,
         rect,
         snapshot_rect,
+        snapshot.source_size,
         snapshot.buffer,
         spec,
     ));
@@ -445,9 +454,35 @@ fn keyboard_focused_on(state: &State, root: &WlSurface) -> bool {
 }
 
 /// Move the keyboard focus to a remaining window, or to nobody.
-fn focus_next_window(state: &mut State) {
+///
+/// `workspace` is where the removed window lived. When it is known, only
+/// windows on that workspace are candidates: closing a window must not move
+/// focus to a window on a workspace that is currently off screen. When the
+/// output or workspace is already gone, fall back to the topmost window in the
+/// whole space.
+fn focus_next_window(state: &mut State, workspace: Option<(smithay::output::Output, usize)>) {
     // Space elements are stored back to front; the last one is on top.
-    let next = state.core.space.elements().last().cloned();
+    let next = match workspace {
+        Some((output, index)) => {
+            let Some(ids) = state.core.layout.workspace_ids(&output, index) else {
+                return focus_next_window(state, None);
+            };
+            state
+                .core
+                .space
+                .elements()
+                .rev()
+                .find(|window| {
+                    return state
+                        .core
+                        .layout
+                        .by_window(window)
+                        .is_some_and(|managed| return ids.contains(&managed.id));
+                })
+                .cloned()
+        }
+        None => state.core.space.elements().last().cloned(),
+    };
     match next {
         Some(next) => {
             let surface = next.wl_surface().map(|surface| return surface.into_owned());
@@ -468,6 +503,11 @@ pub fn unmap_window(state: &mut State, root: &WlSurface, window: Window) {
     // Baked by the null-buffer pre-commit hook while the old buffer was still
     // alive. Destroy-after-unmap does not have a second chance to see it.
     let closing = state.core.layout.take_pending_unmap_closing(root);
+    let previous_workspace = state
+        .core
+        .layout
+        .by_root(root)
+        .and_then(|managed| return state.core.layout.workspace_of(managed.id));
 
     LayoutManager::remove_window(state, root);
     if let Some(closing) = closing {
@@ -484,7 +524,7 @@ pub fn unmap_window(state: &mut State, root: &WlSurface, window: Window) {
 
     // The keyboard must not point at a window that left the screen.
     if held_focus {
-        focus_next_window(state);
+        focus_next_window(state, previous_workspace);
     }
 
     LayoutManager::relayout(state);

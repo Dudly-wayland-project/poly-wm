@@ -803,11 +803,15 @@ fn push_closing<R>(
         // compositor coordinates (multi-output offsets must not leak in here).
         let local_dst = Rectangle::new(dst.loc - output_geometry.loc, dst.size);
         let location = local_dst.loc.to_f64().to_physical_precise_round(scale);
+        // Sample the whole baked texture while drawing it at the scaled
+        // destination size. Without the explicit source rectangle Smithay
+        // derives it from `size`, which samples only the top-left corner.
+        let src = Rectangle::from_size(closing.source_size.to_f64());
         let element = TextureRenderElement::from_texture_buffer(
             location,
             &closing.buffer,
             Some(alpha),
-            None,
+            Some(src),
             Some(local_dst.size),
             Kind::Unspecified,
         );
@@ -1315,6 +1319,13 @@ pub struct WindowSnapshot {
     pub buffer: TextureBuffer<GlesTexture>,
     /// The covered rectangle relative to the workspace origin (logical).
     pub bounds: Rectangle<i32, Logical>,
+    /// Full size of the baked texture, in the texture's own logical units.
+    ///
+    /// The texture is created with scale 1, so this equals the buffer size in
+    /// pixels. The close animation needs it as the source rectangle: deriving
+    /// the source from the scaled destination size would sample only the
+    /// top-left corner and crop the window instead of shrinking it.
+    pub source_size: Size<i32, Logical>,
 }
 
 /// Render a window into an offscreen texture for the close animation.
@@ -1433,6 +1444,7 @@ pub fn snapshot_window(
     return Some(WindowSnapshot {
         buffer,
         bounds: bounds_logical,
+        source_size: Size::from((bounds.size.w, bounds.size.h)),
     });
 }
 

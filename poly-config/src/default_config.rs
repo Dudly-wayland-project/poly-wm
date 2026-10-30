@@ -139,8 +139,10 @@ return {
     spawn_at_startup = false,
   },
 
-  -- Lua layouts: `ctx` carries the output work area, the windows in order and
-  -- the output name; the return value maps window ids to geometry.
+  -- Lua layouts: `ctx` carries the output work area, the workspace id and the
+  -- windows in order; the return value maps window ids to geometry. A layout
+  -- table can also declare `actions`, per-layout `keybinds` and an `insert`
+  -- hook (`docs/config.md`).
   -- layouts = {
   --   columns = function(ctx)
   --     local wa, n, out = ctx.output.work_area, #ctx.windows, {}

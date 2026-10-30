@@ -15,7 +15,9 @@ use std::fmt;
 use std::rc::Rc;
 
 use mlua::{Function, HookTriggers, Lua, Table, Value, VmState};
+use poly_ipc::Action;
 
+use crate::binds::{Key, Keybind};
 use crate::config::{
     Color, Config, LayoutInfo, LayoutOptionValue, OutputConfig, OutputMode, OutputPosition,
     OutputScale, OutputTransform, WindowRule,
@@ -76,11 +78,26 @@ pub struct LayoutOutput {
     pub work_area: LayoutRect,
 }
 
+/// Identity of the workspace a layout call runs for.
+///
+/// The id survives reordering the workspace stack (moving a workspace up or
+/// down), so a layout can bucket its own state by it. It is only stable for the
+/// lifetime of the compositor process, like window ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayoutWorkspace {
+    /// Stable workspace id.
+    pub id: u64,
+    /// 1-based position in the output's workspace stack.
+    pub index: usize,
+}
+
 /// Everything a layout sees for one output.
 #[derive(Debug, Clone)]
 pub struct LayoutContext {
     /// The output being arranged.
     pub output: LayoutOutput,
+    /// The workspace being arranged.
+    pub workspace: LayoutWorkspace,
     /// Tiled windows, in layout order.
     pub windows: Vec<LayoutWindow>,
     /// Floating window ids, bottom to top.
@@ -89,6 +106,24 @@ pub struct LayoutContext {
     pub fullscreen: Vec<u64>,
     /// The focused window id, if any.
     pub focused: Option<u64>,
+}
+
+/// State changes requested by a layout action.
+///
+/// Actions never mutate compositor state directly: they return this table and
+/// the layout manager applies the effects in one place. This keeps the Rust
+/// window order authoritative while Lua owns column grouping and viewport
+/// state.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LayoutEffects {
+    /// Window id that should receive keyboard focus.
+    pub focus: Option<u64>,
+    /// New tiled order, which must be a permutation of the current one.
+    pub order: Option<Vec<u64>>,
+    /// 1-based workspace to switch to on the action's output.
+    pub switch_workspace: Option<usize>,
+    /// Ask for another `arrange` call even if nothing else changed.
+    pub relayout: bool,
 }
 
 /// A layout failed and the caller should keep the previous geometry or use the
@@ -111,6 +146,10 @@ struct Program {
     name: String,
     handles_fullscreen: bool,
     arrange: Function,
+    /// `actions.<name> = function(ctx, args) … end`.
+    actions: HashMap<String, Function>,
+    /// Optional hook deciding where a newly mapped window is inserted.
+    insert: Option<Function>,
     state: Table,
 }
 
@@ -196,13 +235,22 @@ impl LayoutPrograms {
         let mut metadata = Vec::new();
         for (name, value) in lx::string_entries(&layouts, "layouts", errors) {
             let path = path_key("layouts", &name);
-            let (arrange, setup, handles_fullscreen) = match value {
-                Value::Function(function) => (function, None, false),
+            let (arrange, setup, handles_fullscreen, actions, insert, keybinds) = match value {
+                Value::Function(function) => {
+                    (function, None, false, HashMap::new(), None, Vec::new())
+                }
                 Value::Table(table) => {
                     lx::warn_unknown(
                         &table,
                         &path,
-                        &["arrange", "setup", "handles_fullscreen"],
+                        &[
+                            "arrange",
+                            "setup",
+                            "handles_fullscreen",
+                            "actions",
+                            "keybinds",
+                            "insert",
+                        ],
                         errors,
                     );
                     let arrange = match lx::field(&table, "arrange") {
@@ -232,7 +280,27 @@ impl LayoutPrograms {
                     };
                     let handles_fullscreen =
                         lx::boolean(&table, "handles_fullscreen", &path, errors).unwrap_or(false);
-                    (arrange, setup, handles_fullscreen)
+                    let actions = parse_actions(&table, &path, errors);
+                    let keybinds = parse_keybinds(&table, &path, &actions, errors);
+                    let insert = match lx::field(&table, "insert") {
+                        Some(Value::Function(function)) => Some(function),
+                        Some(value) => {
+                            errors.error(
+                                path_key(&path, "insert"),
+                                format!("expected a function, got {}", lx::type_name(&value)),
+                            );
+                            None
+                        }
+                        None => None,
+                    };
+                    (
+                        arrange,
+                        setup,
+                        handles_fullscreen,
+                        actions,
+                        insert,
+                        keybinds,
+                    )
                 }
                 other => {
                     errors.error(
@@ -269,11 +337,14 @@ impl LayoutPrograms {
             metadata.push(LayoutInfo {
                 name: name.clone(),
                 handles_fullscreen,
+                keybinds,
             });
             programs.push(Program {
                 name,
                 handles_fullscreen,
                 arrange,
+                actions,
+                insert,
                 state,
             });
         }
@@ -377,11 +448,308 @@ impl LayoutPrograms {
         return parse_result(value);
     }
 
+    /// Call an action declared by `layout`.
+    ///
+    /// The handler receives the same context table `arrange` gets, plus a
+    /// 1-based list of the string arguments from the keybinding or IPC request.
+    /// It must return a table of effects (or nothing).
+    pub fn invoke_action(
+        &self,
+        layout: &str,
+        action: &str,
+        context: &LayoutContext,
+        args: &[String],
+    ) -> Result<LayoutEffects, LayoutError> {
+        let Some(program) = self.programs.iter().find(|program| program.name == layout) else {
+            return Err(LayoutError {
+                message: format!("no layout named {layout:?}"),
+            });
+        };
+        let Some(function) = program.actions.get(action) else {
+            let mut names = program.actions.keys().cloned().collect::<Vec<_>>();
+            names.sort();
+            let defined = if names.is_empty() {
+                "it defines no actions".to_owned()
+            } else {
+                format!("defined actions: {}", names.join(", "))
+            };
+            return Err(LayoutError {
+                message: format!("layout {layout:?} has no action named {action:?} ({defined})"),
+            });
+        };
+
+        self.install_state(program)?;
+        let options = self.options_for(&context.output.name);
+        let context_table = build_context(&self.lua, context, options.as_ref())?;
+        let args_table = self.lua.create_table().map_err(context_error)?;
+        for (index, arg) in args.iter().enumerate() {
+            args_table
+                .set(index + 1, arg.as_str())
+                .map_err(context_error)?;
+        }
+        let value =
+            self.with_budget(|| return function.call::<Value>((context_table, args_table)))?;
+        return parse_effects(value);
+    }
+
+    /// Ask the layout where a newly mapped window should go.
+    ///
+    /// Returns a 0-based insertion index, or `None` when the layout has no
+    /// `insert` hook or returns nil.
+    pub fn insert(
+        &self,
+        layout: &str,
+        context: &LayoutContext,
+        window: &LayoutWindow,
+    ) -> Result<Option<usize>, LayoutError> {
+        let Some(program) = self.programs.iter().find(|program| program.name == layout) else {
+            return Err(LayoutError {
+                message: format!("no layout named {layout:?}"),
+            });
+        };
+        let Some(function) = &program.insert else {
+            return Ok(None);
+        };
+
+        self.install_state(program)?;
+        let options = self.options_for(&context.output.name);
+        let context_table = build_context(&self.lua, context, options.as_ref())?;
+        let window_table = build_window(&self.lua, window)?;
+        let value =
+            self.with_budget(|| return function.call::<Value>((context_table, window_table)))?;
+        return match value {
+            Value::Nil => Ok(None),
+            Value::Integer(index) if index >= 1 => Ok(Some(index as usize - 1)),
+            Value::Number(index) if index.fract() == 0.0 && index >= 1.0 => {
+                Ok(Some(index as usize - 1))
+            }
+            other => Err(LayoutError {
+                message: format!(
+                    "insert() must return a position from 1, got {}",
+                    lx::type_name(&other)
+                ),
+            }),
+        };
+    }
+
+    fn install_state(&self, program: &Program) -> Result<(), LayoutError> {
+        if let Err(err) = self.poly.set("state", program.state.clone()) {
+            return Err(LayoutError {
+                message: format!("cannot install layout state: {err}"),
+            });
+        }
+        return Ok(());
+    }
+
+    /// Run a Lua call with the same instruction budget as `arrange`.
+    fn with_budget<T>(&self, call: impl FnOnce() -> mlua::Result<T>) -> Result<T, LayoutError> {
+        let budget = Rc::new(Cell::new(ARRANGE_BUDGET));
+        let hook_budget = budget.clone();
+        if let Err(err) = self.lua.set_hook(
+            HookTriggers::new().every_nth_instruction(ARRANGE_STEP),
+            move |_lua, _debug| -> mlua::Result<VmState> {
+                let left = hook_budget.get();
+                if left == 0 {
+                    return Err(mlua::Error::runtime("layout ran too long (infinite loop?)"));
+                }
+                hook_budget.set(left.saturating_sub(u64::from(ARRANGE_STEP)));
+                return Ok(VmState::Continue);
+            },
+        ) {
+            return Err(LayoutError {
+                message: format!("cannot install the layout budget hook: {err}"),
+            });
+        }
+        let result = call();
+        self.lua.remove_hook();
+        return result.map_err(|err| {
+            return LayoutError {
+                message: format_lua_error(&err),
+            };
+        });
+    }
+
     /// The `layout_options` of the most specific matching `outputs` entry,
     /// merged with the defaults a glob entry provides.
     fn options_for(&self, output: &str) -> Option<OutputConfig> {
         return crate::config::resolved_output(&self.output_options, output);
     }
+}
+
+fn parse_actions(table: &Table, path: &str, errors: &mut Errors) -> HashMap<String, Function> {
+    let mut actions = HashMap::new();
+    let Some(entries) = lx::table(table, "actions", path, errors) else {
+        return actions;
+    };
+    let actions_path = path_key(path, "actions");
+    for (name, value) in lx::string_entries(&entries, &actions_path, errors) {
+        let entry_path = path_key(&actions_path, &name);
+        if name.is_empty() {
+            errors.error(entry_path, "action names must not be empty");
+            continue;
+        }
+        match value {
+            Value::Function(function) => {
+                actions.insert(name, function);
+            }
+            other => errors.error(
+                entry_path,
+                format!("expected a function, got {}", lx::type_name(&other)),
+            ),
+        }
+    }
+    return actions;
+}
+
+fn parse_keybinds(
+    table: &Table,
+    path: &str,
+    actions: &HashMap<String, Function>,
+    errors: &mut Errors,
+) -> Vec<Keybind> {
+    let mut keybinds = Vec::new();
+    let Some(entries) = lx::table(table, "keybinds", path, errors) else {
+        return keybinds;
+    };
+    let keybinds_path = path_key(path, "keybinds");
+    for (name, value) in lx::string_entries(&entries, &keybinds_path, errors) {
+        let bind_path = path_key(&keybinds_path, &name);
+        let key = match name.parse::<Key>() {
+            Ok(key) => key,
+            Err(err) => {
+                errors.error(&bind_path, err.to_string());
+                continue;
+            }
+        };
+        let Some((action, repeat)) = parse_layout_bind(&value, &bind_path, actions, errors) else {
+            continue;
+        };
+        keybinds.push(Keybind {
+            key,
+            action,
+            repeat,
+        });
+    }
+    return keybinds;
+}
+
+/// A layout keybinding value: an action name, `{ "name", args… }`, or
+/// `{ action = "name", args = { … } }`.
+fn parse_layout_bind(
+    value: &Value,
+    path: &str,
+    actions: &HashMap<String, Function>,
+    errors: &mut Errors,
+) -> Option<(Action, bool)> {
+    let (name, args, repeat) = match value {
+        Value::String(_) => {
+            let name = action_name(value, path, errors)?;
+            (name, Vec::new(), true)
+        }
+        Value::Table(table) => {
+            if let Some(action) = lx::field(table, "action") {
+                lx::warn_unknown(
+                    table,
+                    path,
+                    &["action", "args", "key_repeat", "repeat"],
+                    errors,
+                );
+                let name = action_name(&action, &path_key(path, "action"), errors)?;
+                let args = lx::string_list(table, "args", path, errors).unwrap_or_default();
+                let repeat = lx::boolean(table, "key_repeat", path, errors)
+                    .or_else(|| return lx::boolean(table, "repeat", path, errors))
+                    .unwrap_or(true);
+                (name, args, repeat)
+            } else {
+                let mut values = Vec::new();
+                for (index, item) in table.clone().sequence_values::<Value>().enumerate() {
+                    let item_path = crate::error::path_index(path, index + 1);
+                    let item = match item {
+                        Ok(item) => item,
+                        Err(err) => {
+                            errors.error(item_path, err.to_string());
+                            return None;
+                        }
+                    };
+                    let Value::String(item) = item else {
+                        errors.error(
+                            item_path,
+                            format!(
+                                "expected an action name string, got {}",
+                                lx::type_name(&item)
+                            ),
+                        );
+                        return None;
+                    };
+                    match item.to_str() {
+                        Ok(item) => values.push(item.to_owned()),
+                        Err(_) => {
+                            errors.error(item_path, "string is not valid UTF-8");
+                            return None;
+                        }
+                    }
+                }
+                let Some(name) = values.first().cloned() else {
+                    errors.error(
+                        path,
+                        "expected an action, e.g. \"focus-left\" or { \"focus-left\", \"arg\" }",
+                    );
+                    return None;
+                };
+                let args = values.into_iter().skip(1).collect();
+                (name, args, true)
+            }
+        }
+        other => {
+            errors.error(
+                path,
+                format!(
+                    "expected an action name or table, got {}",
+                    lx::type_name(other)
+                ),
+            );
+            return None;
+        }
+    };
+
+    if !actions.contains_key(&name) {
+        let mut defined = actions.keys().cloned().collect::<Vec<_>>();
+        defined.sort();
+        let message = if defined.is_empty() {
+            format!("the layout defines no action named {name:?}")
+        } else {
+            format!(
+                "the layout defines no action named {name:?} (defined: {})",
+                defined.join(", ")
+            )
+        };
+        errors.error(path, message);
+        return None;
+    }
+    return Some((Action::LayoutAction { name, args }, repeat));
+}
+
+fn action_name(value: &Value, path: &str, errors: &mut Errors) -> Option<String> {
+    return match value {
+        Value::String(name) => match name.to_str() {
+            Ok(name) if !name.is_empty() => Some(name.to_owned()),
+            Ok(_) => {
+                errors.error(path, "action names must not be empty");
+                None
+            }
+            Err(_) => {
+                errors.error(path, "string is not valid UTF-8");
+                None
+            }
+        },
+        other => {
+            errors.error(
+                path,
+                format!("expected an action name, got {}", lx::type_name(other)),
+            );
+            None
+        }
+    };
 }
 
 fn build_context(
@@ -424,45 +792,18 @@ fn build_context(
     output.set("work_area", work_area).map_err(context_error)?;
     table.set("output", output).map_err(context_error)?;
 
+    let workspace = lua.create_table().map_err(context_error)?;
+    workspace
+        .set("id", context.workspace.id)
+        .map_err(context_error)?;
+    workspace
+        .set("index", context.workspace.index)
+        .map_err(context_error)?;
+    table.set("workspace", workspace).map_err(context_error)?;
+
     let windows = lua.create_table().map_err(context_error)?;
     for (index, window) in context.windows.iter().enumerate() {
-        let entry = lua.create_table().map_err(context_error)?;
-        entry.set("id", window.id).map_err(context_error)?;
-        if let Some(app_id) = &window.app_id {
-            entry.set("app_id", app_id.clone()).map_err(context_error)?;
-        }
-        if let Some(title) = &window.title {
-            entry.set("title", title.clone()).map_err(context_error)?;
-        }
-        entry
-            .set("focused", window.focused)
-            .map_err(context_error)?;
-        entry.set("x", window.rect.x).map_err(context_error)?;
-        entry.set("y", window.rect.y).map_err(context_error)?;
-        entry.set("w", window.rect.w).map_err(context_error)?;
-        entry.set("h", window.rect.h).map_err(context_error)?;
-        let geometry = lua.create_table().map_err(context_error)?;
-        geometry.set("x", window.rect.x).map_err(context_error)?;
-        geometry.set("y", window.rect.y).map_err(context_error)?;
-        geometry.set("w", window.rect.w).map_err(context_error)?;
-        geometry.set("h", window.rect.h).map_err(context_error)?;
-        entry.set("geometry", geometry).map_err(context_error)?;
-        let min_size = lua.create_table().map_err(context_error)?;
-        min_size
-            .set("w", window.min_size.0)
-            .map_err(context_error)?;
-        min_size
-            .set("h", window.min_size.1)
-            .map_err(context_error)?;
-        entry.set("min_size", min_size).map_err(context_error)?;
-        let max_size = lua.create_table().map_err(context_error)?;
-        max_size
-            .set("w", window.max_size.0)
-            .map_err(context_error)?;
-        max_size
-            .set("h", window.max_size.1)
-            .map_err(context_error)?;
-        entry.set("max_size", max_size).map_err(context_error)?;
+        let entry = build_window(lua, window)?;
         windows.set(index + 1, entry).map_err(context_error)?;
     }
     table.set("windows", windows).map_err(context_error)?;
@@ -500,6 +841,47 @@ fn build_context(
     table.set("options", options_table).map_err(context_error)?;
 
     return Ok(table);
+}
+
+fn build_window(lua: &Lua, window: &LayoutWindow) -> Result<Table, LayoutError> {
+    let entry = lua.create_table().map_err(context_error)?;
+    entry.set("id", window.id).map_err(context_error)?;
+    if let Some(app_id) = &window.app_id {
+        entry.set("app_id", app_id.clone()).map_err(context_error)?;
+    }
+    if let Some(title) = &window.title {
+        entry.set("title", title.clone()).map_err(context_error)?;
+    }
+    entry
+        .set("focused", window.focused)
+        .map_err(context_error)?;
+    entry.set("x", window.rect.x).map_err(context_error)?;
+    entry.set("y", window.rect.y).map_err(context_error)?;
+    entry.set("w", window.rect.w).map_err(context_error)?;
+    entry.set("h", window.rect.h).map_err(context_error)?;
+    let geometry = lua.create_table().map_err(context_error)?;
+    geometry.set("x", window.rect.x).map_err(context_error)?;
+    geometry.set("y", window.rect.y).map_err(context_error)?;
+    geometry.set("w", window.rect.w).map_err(context_error)?;
+    geometry.set("h", window.rect.h).map_err(context_error)?;
+    entry.set("geometry", geometry).map_err(context_error)?;
+    let min_size = lua.create_table().map_err(context_error)?;
+    min_size
+        .set("w", window.min_size.0)
+        .map_err(context_error)?;
+    min_size
+        .set("h", window.min_size.1)
+        .map_err(context_error)?;
+    entry.set("min_size", min_size).map_err(context_error)?;
+    let max_size = lua.create_table().map_err(context_error)?;
+    max_size
+        .set("w", window.max_size.0)
+        .map_err(context_error)?;
+    max_size
+        .set("h", window.max_size.1)
+        .map_err(context_error)?;
+    entry.set("max_size", max_size).map_err(context_error)?;
+    return Ok(entry);
 }
 
 fn context_error(err: mlua::Error) -> LayoutError {
@@ -563,6 +945,113 @@ fn parse_result(value: Value) -> Result<HashMap<u64, LayoutRect>, LayoutError> {
         result.insert(id, LayoutRect { x, y, w, h });
     }
     return Ok(result);
+}
+
+/// Parse the table a layout action returned.
+///
+/// Unknown fields are ignored so a layout can carry its own bookkeeping in the
+/// same table. Supported fields are `focus`, `order`, `switch_workspace` and
+/// `relayout`.
+fn parse_effects(value: Value) -> Result<LayoutEffects, LayoutError> {
+    let mut effects = LayoutEffects::default();
+    let table = match value {
+        Value::Nil => return Ok(effects),
+        Value::Table(table) => table,
+        other => {
+            return Err(LayoutError {
+                message: format!(
+                    "an action must return a table of effects or nothing, got {}",
+                    lx::type_name(&other)
+                ),
+            });
+        }
+    };
+
+    match table.get::<Value>("focus").map_err(effects_error)? {
+        Value::Nil => {}
+        Value::Integer(id) if id >= 1 => effects.focus = Some(id as u64),
+        Value::Number(id) if id.fract() == 0.0 && id >= 1.0 => effects.focus = Some(id as u64),
+        other => {
+            return Err(LayoutError {
+                message: format!(
+                    "effect `focus` must be a window id, got {}",
+                    lx::type_name(&other)
+                ),
+            });
+        }
+    }
+
+    match table.get::<Value>("order").map_err(effects_error)? {
+        Value::Nil => {}
+        Value::Table(order) => {
+            let mut ids = Vec::new();
+            for item in order.sequence_values::<Value>() {
+                let item = item.map_err(effects_error)?;
+                let id = match item {
+                    Value::Integer(id) if id >= 1 => id as u64,
+                    Value::Number(id) if id.fract() == 0.0 && id >= 1.0 => id as u64,
+                    other => {
+                        return Err(LayoutError {
+                            message: format!(
+                                "effect `order` must contain window ids, got {}",
+                                lx::type_name(&other)
+                            ),
+                        });
+                    }
+                };
+                ids.push(id);
+            }
+            effects.order = Some(ids);
+        }
+        other => {
+            return Err(LayoutError {
+                message: format!(
+                    "effect `order` must be a list of window ids, got {}",
+                    lx::type_name(&other)
+                ),
+            });
+        }
+    }
+
+    match table
+        .get::<Value>("switch_workspace")
+        .map_err(effects_error)?
+    {
+        Value::Nil => {}
+        Value::Integer(index) if index >= 1 => effects.switch_workspace = Some(index as usize),
+        Value::Number(index) if index.fract() == 0.0 && index >= 1.0 => {
+            effects.switch_workspace = Some(index as usize);
+        }
+        other => {
+            return Err(LayoutError {
+                message: format!(
+                    "effect `switch_workspace` must be a 1-based workspace number, got {}",
+                    lx::type_name(&other)
+                ),
+            });
+        }
+    }
+
+    match table.get::<Value>("relayout").map_err(effects_error)? {
+        Value::Nil => {}
+        Value::Boolean(relayout) => effects.relayout = relayout,
+        other => {
+            return Err(LayoutError {
+                message: format!(
+                    "effect `relayout` must be a boolean, got {}",
+                    lx::type_name(&other)
+                ),
+            });
+        }
+    }
+
+    return Ok(effects);
+}
+
+fn effects_error(err: mlua::Error) -> LayoutError {
+    return LayoutError {
+        message: format!("cannot read the action effects: {err}"),
+    };
 }
 
 fn number_field(table: &Table, key: &str, id: u64) -> Result<i32, LayoutError> {

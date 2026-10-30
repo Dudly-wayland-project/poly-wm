@@ -104,6 +104,20 @@ pub enum Action {
     MoveWorkspaceDown,
     /// Show or hide the workspace overview.
     ToggleOverview,
+
+    /// Invoke an action declared by the active workspace's Lua layout.
+    ///
+    /// Layouts declare their own action names and handlers, so this variant is
+    /// the one stable spelling the IPC protocol and global keybindings use.
+    /// Layout-scoped keybindings construct the same variant directly after the
+    /// configuration loader checks that the layout defines `name`.
+    LayoutAction {
+        /// Action name from the layout's `actions` table.
+        name: String,
+        /// String arguments passed to the handler.
+        #[serde(default)]
+        args: Vec<String>,
+    },
 }
 
 impl Action {
@@ -142,6 +156,7 @@ impl Action {
             Action::MoveWorkspaceUp => "move-workspace-up",
             Action::MoveWorkspaceDown => "move-workspace-down",
             Action::ToggleOverview => "toggle-overview",
+            Action::LayoutAction { .. } => "layout-action",
         };
     }
 
@@ -212,6 +227,18 @@ impl Action {
             "focus-window" => Action::FocusWindow {
                 id: window_id_arg(name, rest)?,
             },
+            "layout-action" => {
+                let Some((action, args)) = rest.split_first() else {
+                    return Err(InvalidAction {
+                        name: name.clone(),
+                        hint: Some("expected a layout action: action layout-action focus-left"),
+                    });
+                };
+                Action::LayoutAction {
+                    name: action.clone(),
+                    args: args.to_vec(),
+                }
+            }
             _ => {
                 if !rest.is_empty() {
                     return Err(InvalidAction {
@@ -318,6 +345,9 @@ impl FromStr for Action {
             "focus-workspace" => Some("use { focus_workspace = 2 }"),
             "focus-window" => Some("use { focus_window = 3 }, or `poly msg action focus-window 3`"),
             "move-window-to-workspace" => Some("use { move_window_to_workspace = 2 }"),
+            "layout-action" => Some(
+                "use { layout_action = { \"name\", \"arg\" } }, or `poly msg action layout-action name`",
+            ),
             _ => None,
         };
         return Err(InvalidAction {
@@ -379,6 +409,26 @@ mod tests {
 
         let json = serde_json::to_string(&Action::CloseWindow).unwrap();
         assert_eq!(json, r#""CloseWindow""#);
+
+        let action = Action::LayoutAction {
+            name: "focus-left".into(),
+            args: vec!["1".into()],
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        assert_eq!(
+            json,
+            r#"{"LayoutAction":{"name":"focus-left","args":["1"]}}"#
+        );
+        assert_eq!(serde_json::from_str::<Action>(&json).unwrap(), action);
+
+        // `args` is optional on the wire.
+        assert_eq!(
+            serde_json::from_str::<Action>(r#"{"LayoutAction":{"name":"focus-left"}}"#).unwrap(),
+            Action::LayoutAction {
+                name: "focus-left".into(),
+                args: Vec::new(),
+            }
+        );
     }
 
     #[test]
@@ -452,6 +502,20 @@ mod tests {
         assert_eq!(
             parse(&["focus-window", "3"]).unwrap(),
             Action::FocusWindow { id: 3 }
+        );
+        assert_eq!(
+            parse(&["layout-action", "focus-left"]).unwrap(),
+            Action::LayoutAction {
+                name: "focus-left".into(),
+                args: Vec::new(),
+            }
+        );
+        assert_eq!(
+            parse(&["layout-action", "resize-column", "0.5"]).unwrap(),
+            Action::LayoutAction {
+                name: "resize-column".into(),
+                args: vec!["0.5".into()],
+            }
         );
 
         // Argument problems come back as hints, not silent no-ops.

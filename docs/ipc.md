@@ -342,6 +342,13 @@ Actions with fields:
 | `{"FocusWorkspace":{"index":2}}` | Focus workspace 2 (1-based), creating it if needed. |
 | `{"FocusWindow":{"id":3}}` | Focus a window by id. Ids are valid only while this compositor process runs. |
 | `{"MoveWindowToWorkspace":{"index":2}}` | Move the focused window to workspace 2 and follow it. |
+| `{"LayoutAction":{"name":"focus-left","args":[]}}` | Invoke an action declared by the active workspace's Lua layout. |
+
+`LayoutAction` is the generic entry point for layout-defined actions. The name
+and arguments are passed to the active layout's `actions` table; an unknown name
+is reported in the log and does nothing. `args` is optional and defaults to an
+empty list. Layout-scoped keybindings use the same action internally, but the
+configuration loader already checks their names against the layout.
 
 A complete action request wraps the action in the `Action` variant:
 
@@ -457,6 +464,8 @@ poly msg action toggle-overview
 poly msg action -- spawn foot -e top
 poly msg action focus-workspace 2
 poly msg action move-window-to-workspace 3
+poly msg action layout-action focus-left
+poly msg action layout-action resize-column 0.5
 
 poly msg output eDP-1 scale 1.5
 poly msg output eDP-1 mode 1920x1080@60
