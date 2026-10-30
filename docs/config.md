@@ -802,9 +802,9 @@ appends.
 
 [`docs/examples/scrolling.lua`](examples/scrolling.lua) is a complete
 one-window-per-column scrolling layout built from these pieces: per-workspace
-width and viewport state, focused-column following, column reordering and
-resizing. It is the reference for extending the same state to multi-window
-columns and consume/expel.
+width, viewport and maximized state, focused-column following, column
+reordering, resizing and niri-style `maximize-column`. It is the reference for
+extending the same state to multi-window columns and consume/expel.
 
 Each entry in `ctx.windows` has:
 

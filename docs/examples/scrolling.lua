@@ -27,10 +27,18 @@ local function state_for(workspace)
   end
   local state = all[workspace.id]
   if not state then
-    state = { offset = 0, widths = {} }
+    state = { offset = 0, widths = {}, maximized = {} }
     all[workspace.id] = state
   end
+  state.maximized = state.maximized or {}
   return state
+end
+
+-- Maximize (niri's `maximize-column`): the column fills the working area but
+-- stays in the scrolling layout, so gaps and borders remain. The stored width
+-- is untouched, so unmaximizing restores the exact previous width.
+local function is_maximized(state, id)
+  return state.maximized[id] == true
 end
 
 -- Columns in content coordinates, before the viewport offset. Returns the
@@ -43,8 +51,14 @@ local function measure(ctx, state)
     local width = state.widths[window.id] or default_width(area)
     width = math.max(MIN_COLUMN_WIDTH, math.min(width, area.w))
     state.widths[window.id] = width
-    columns[#columns + 1] = { id = window.id, left = total, width = width }
-    total = total + width + poly.gap
+    -- Maximizing only changes the presented width; `state.widths` keeps the
+    -- width to restore. Height already spans the working area.
+    local shown = width
+    if is_maximized(state, window.id) then
+      shown = area.w
+    end
+    columns[#columns + 1] = { id = window.id, left = total, width = shown }
+    total = total + shown + poly.gap
   end
   if #columns > 0 then
     total = total - poly.gap
@@ -69,6 +83,11 @@ local function prune(state, ctx)
   for id in pairs(state.widths) do
     if not present[id] then
       state.widths[id] = nil
+    end
+  end
+  for id in pairs(state.maximized) do
+    if not present[id] then
+      state.maximized[id] = nil
     end
   end
 end
@@ -120,8 +139,29 @@ local function resize_column(ctx, state, delta)
   if not index then
     return nil
   end
+  -- Like niri: changing the width cancels maximization and resizes from the
+  -- stored width.
+  if is_maximized(state, ctx.focused) then
+    state.maximized[ctx.focused] = nil
+    columns = measure(ctx, state)
+  end
   local width = columns[index].width + delta
   state.widths[ctx.focused] = clamp(width, MIN_COLUMN_WIDTH, ctx.output.work_area.w)
+  return { relayout = true }
+end
+
+-- Toggle `maximize-column` for the focused column.
+local function toggle_maximize(ctx, state)
+  local columns = measure(ctx, state)
+  local index = column_index(columns, ctx.focused)
+  if not index then
+    return nil
+  end
+  if is_maximized(state, ctx.focused) then
+    state.maximized[ctx.focused] = nil
+  else
+    state.maximized[ctx.focused] = true
+  end
   return { relayout = true }
 end
 
@@ -219,6 +259,10 @@ return {
         ["center-column"] = function(ctx)
           return center_column(ctx, state_for(ctx.workspace))
         end,
+
+        ["maximize-column"] = function(ctx)
+          return toggle_maximize(ctx, state_for(ctx.workspace))
+        end,
       },
 
       keybinds = {
@@ -231,6 +275,7 @@ return {
         ["Alt+Minus"] = { action = "resize-column", args = { "-64" }, key_repeat = true },
         ["Alt+Equal"] = { action = "resize-column", args = { "64" }, key_repeat = true },
         ["Alt+W"] = "center-column",
+        ["Alt+M"] = { "maximize-column", key_repeat = false },
       },
 
       -- New windows open to the right of the focused column, niri style.
