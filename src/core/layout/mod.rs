@@ -985,7 +985,7 @@ impl LayoutManager {
 
         let outputs = state.core.space.outputs().cloned().collect::<Vec<_>>();
         let size = window.geometry().size;
-        let rect = initial_rect(state, output.as_ref(), size);
+        let initial = initial_rect(state, output.as_ref(), size);
         let open_animation = {
             let spec = state.core.config.general.animations.window_open();
             (!spec.duration.is_zero()).then(|| {
@@ -1015,7 +1015,7 @@ impl LayoutManager {
                     title: title.map(str::to_owned),
                     // The window has not been focused yet at insert time.
                     focused: false,
-                    rect: to_layout_rect(rect),
+                    rect: to_layout_rect(initial),
                     min_size,
                     max_size,
                 };
@@ -1031,8 +1031,8 @@ impl LayoutManager {
             output: output.clone(),
             tiled: !floating,
             fullscreen: None,
-            floating_rect: rect,
-            target_rect: rect,
+            floating_rect: initial,
+            target_rect: initial,
             animation: None,
             drag_rect: None,
             drop_preview: None,
@@ -1067,12 +1067,39 @@ impl LayoutManager {
             manager.hooks.insert(root.clone(), hook);
         }
         manager.dirty_space = true;
+
+        // The window is in its workspace now, so the layout can say where it
+        // really goes. Adopt that rectangle as the target *before* mapping it
+        // into the space: the opening animation has to fade the window in at
+        // its final slot, not at the centred fallback that the reflow would
+        // reach one configure round-trip later.
+        let rect = if floating {
+            clamp_to_hints(window, initial)
+        } else {
+            let focused = if focus_on_map {
+                Some(id)
+            } else {
+                focused_id(state)
+            };
+            output
+                .as_ref()
+                .and_then(|output| return Self::predict_rect(state, output, focused, id))
+                .map(|rect| return clamp_to_hints(window, rect))
+                .unwrap_or_else(|| return clamp_to_hints(window, initial))
+        };
+        if let Some(managed) = state.core.layout.windows.get_mut(&id) {
+            managed.target_rect = rect;
+            // Floating windows keep `floating_rect` as their own geometry, and
+            // a tiled window returns there when it starts floating, so both
+            // open at the same rectangle.
+            managed.floating_rect = rect;
+        }
         state
             .core
             .space
             .map_element(window.clone(), rect.loc, false);
         debug!(
-            "mapped window {id} ({:?}) on {:?} floating={floating} focus={focus_on_map}",
+            "mapped window {id} ({:?}) on {:?} at {rect:?} floating={floating} focus={focus_on_map}",
             app_id.unwrap_or(""),
             output_name,
         );
@@ -1262,82 +1289,15 @@ impl LayoutManager {
                 .map(|layout| return layout.workspaces.len())
                 .unwrap_or(0);
             for index in 0..count {
-                let Some((context, tiled, floating, layout_name)) =
-                    Self::workspace_context(state, output, index, area, now, focused)
-                else {
-                    continue;
-                };
-
-                let mut lua_result = None;
-                let mut lua_error = None;
-                // The built-in `columns` stack is not a `LayoutProgram`: only
-                // ask the Lua bridge when the workspace really names one.
-                if let Some(programs) = &state.core.layout.programs {
-                    if programs.has(&layout_name) {
-                        match programs.arrange(&layout_name, &context) {
-                            Ok(result) => lua_result = Some(result),
-                            Err(err) => lua_error = Some(err.to_string()),
-                        }
-                    }
-                }
-                if let Some(message) = lua_error {
-                    let key = format!("error:{}:{index}:{layout_name}", output.name());
-                    if state.core.layout.warned.insert(key) {
-                        warn!(
-                            "layout {layout_name:?} on {} workspace {index} failed: {message}; using the column fallback",
-                            output.name()
-                        );
-                    }
-                }
-
-                let handles_fullscreen =
-                    state.core.layout.handles_fullscreen(&layout_name) && lua_result.is_some();
-                if let Some(result) = &lua_result {
-                    let expected = context.windows.iter().map(|window| return window.id);
-                    for id in expected {
-                        let key = format!("missing:{}:{index}:{layout_name}:{id}", output.name());
-                        if !result.contains_key(&id) && state.core.layout.warned.insert(key) {
-                            warn!(
-                                "layout {layout_name:?} on {} workspace {index} did not return window {id}; keeping its geometry",
-                                output.name()
-                            );
-                        }
-                    }
-                }
-
-                let fallback = column_layout(
-                    &tiled,
-                    &context.fullscreen,
+                desired.extend(Self::workspace_desired(
+                    state,
+                    output,
+                    index,
                     area,
-                    state.core.config.general.gap,
-                );
-                for id in tiled.iter().copied().chain(floating.iter().copied()) {
-                    let Some(window) = state.core.layout.windows.get(&id) else {
-                        continue;
-                    };
-                    let rect = if window.fullscreen == Some(FullscreenMode::Fullscreen) {
-                        match lua_result
-                            .as_ref()
-                            .and_then(|result| return result.get(&id))
-                        {
-                            Some(rect) if handles_fullscreen => from_layout_rect(*rect),
-                            _ => output_rect,
-                        }
-                    } else if let Some(rect) = lua_result
-                        .as_ref()
-                        .and_then(|result| return result.get(&id))
-                    {
-                        from_layout_rect(*rect)
-                    } else if window.tiled {
-                        fallback
-                            .get(&id)
-                            .copied()
-                            .unwrap_or_else(|| return window.target_rect)
-                    } else {
-                        window.floating_rect
-                    };
-                    desired.insert(id, rect);
-                }
+                    output_rect,
+                    now,
+                    focused,
+                ));
             }
         }
 
@@ -1352,6 +1312,121 @@ impl LayoutManager {
         } else {
             sync_space(state);
         }
+    }
+
+    /// The rectangles the active layout gives every window of one workspace.
+    ///
+    /// `relayout` arranges every workspace this way; `map_window` uses the
+    /// same function for the workspace a new window just joined, so the
+    /// rectangle it opens at is the one the next `relayout` will keep.
+    fn workspace_desired(
+        state: &mut State,
+        output: &smithay::output::Output,
+        index: usize,
+        area: Rectangle<i32, Logical>,
+        output_rect: Rectangle<i32, Logical>,
+        now: Instant,
+        focused: Option<u64>,
+    ) -> HashMap<u64, Rectangle<i32, Logical>> {
+        let mut desired = HashMap::new();
+        let Some((context, tiled, floating, layout_name)) =
+            Self::workspace_context(state, output, index, area, now, focused)
+        else {
+            return desired;
+        };
+
+        let mut lua_result = None;
+        let mut lua_error = None;
+        // The built-in `columns` stack is not a `LayoutProgram`: only
+        // ask the Lua bridge when the workspace really names one.
+        if let Some(programs) = &state.core.layout.programs {
+            if programs.has(&layout_name) {
+                match programs.arrange(&layout_name, &context) {
+                    Ok(result) => lua_result = Some(result),
+                    Err(err) => lua_error = Some(err.to_string()),
+                }
+            }
+        }
+        if let Some(message) = lua_error {
+            let key = format!("error:{}:{index}:{layout_name}", output.name());
+            if state.core.layout.warned.insert(key) {
+                warn!(
+                    "layout {layout_name:?} on {} workspace {index} failed: {message}; using the column fallback",
+                    output.name()
+                );
+            }
+        }
+
+        let handles_fullscreen =
+            state.core.layout.handles_fullscreen(&layout_name) && lua_result.is_some();
+        if let Some(result) = &lua_result {
+            let expected = context.windows.iter().map(|window| return window.id);
+            for id in expected {
+                let key = format!("missing:{}:{index}:{layout_name}:{id}", output.name());
+                if !result.contains_key(&id) && state.core.layout.warned.insert(key) {
+                    warn!(
+                        "layout {layout_name:?} on {} workspace {index} did not return window {id}; keeping its geometry",
+                        output.name()
+                    );
+                }
+            }
+        }
+
+        let fallback = column_layout(
+            &tiled,
+            &context.fullscreen,
+            area,
+            state.core.config.general.gap,
+        );
+        for id in tiled.iter().copied().chain(floating.iter().copied()) {
+            let Some(window) = state.core.layout.windows.get(&id) else {
+                continue;
+            };
+            let rect = if window.fullscreen == Some(FullscreenMode::Fullscreen) {
+                match lua_result
+                    .as_ref()
+                    .and_then(|result| return result.get(&id))
+                {
+                    Some(rect) if handles_fullscreen => from_layout_rect(*rect),
+                    _ => output_rect,
+                }
+            } else if let Some(rect) = lua_result
+                .as_ref()
+                .and_then(|result| return result.get(&id))
+            {
+                from_layout_rect(*rect)
+            } else if window.tiled {
+                fallback
+                    .get(&id)
+                    .copied()
+                    .unwrap_or_else(|| return window.target_rect)
+            } else {
+                window.floating_rect
+            };
+            desired.insert(id, rect);
+        }
+        return desired;
+    }
+
+    /// Where the layout will put `id` in the active workspace of `output`.
+    ///
+    /// `map_window` needs the final rectangle before the window is mapped into
+    /// the space. Mapping it at the centered `initial_rect` first and letting
+    /// the following reflow move it makes the opening animation fade the
+    /// window in at the middle of the screen and then jump to its slot.
+    fn predict_rect(
+        state: &mut State,
+        output: &smithay::output::Output,
+        focused: Option<u64>,
+        id: u64,
+    ) -> Option<Rectangle<i32, Logical>> {
+        let area = Self::layout_area(state, output)?;
+        let output_rect = Self::output_rect(state, output)?;
+        let index = state.core.layout.active_workspace(output);
+        let now = Instant::now();
+        let desired =
+            Self::workspace_desired(state, output, index, area, output_rect, now, focused);
+        return desired.get(&id).copied();
     }
 
     /// Ask the active layout of a workspace where a new window belongs.
@@ -3599,6 +3674,11 @@ fn match_window_rule<'a>(
         .find(|rule| return rule.matches(app_id, title));
 }
 
+/// A first guess at a window's rectangle, before the layout has run.
+///
+/// `map_window` takes the client's own geometry, clipped and centered on the
+/// output, as a seed: it is the fallback when no layout can answer, and the
+/// `rect` hint the `insert` hook sees.
 fn initial_rect(
     state: &State,
     output: Option<&smithay::output::Output>,

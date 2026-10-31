@@ -2,10 +2,10 @@
 
 //! xdg-shell: window and popup creation, plus the initial configure handshake.
 //!
-//! M1 maps windows (centered on the first output) and validates client-side
+//! Mapping hands the window to the layout engine, which decides its rectangle
+//! before it enters the space. This module also validates client-side
 //! move/resize drags against the pointer grab that started them
-//! (`docs/plan.md` §9.5). Fullscreen and tiling semantics arrive with the
-//! layout engine in M3.
+//! (`docs/plan.md` §9.5).
 
 use smithay::desktop::{PopupKind, Window};
 use smithay::input::pointer::{CursorImageStatus, Focus, GrabStartData};

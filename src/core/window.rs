@@ -195,7 +195,11 @@ fn apply_tiled_state(no_csd: bool, toplevel: &ToplevelSurface) {
     });
 }
 
-/// Display a window that just got its first buffer, centered on an output.
+/// Display a window that just got its first buffer.
+///
+/// The layout decides the rectangle before the window enters the space, so the
+/// opening animation fades it in where it belongs instead of at a centered
+/// fallback that the following reflow would immediately move away from.
 pub fn map_window(state: &mut State, root: &WlSurface) {
     let Some(unmapped) = state.core.unmapped_windows.remove(root) else {
         return;

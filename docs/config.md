@@ -788,8 +788,10 @@ keybinds = {
 
 `insert` is called when a tiled window maps, before it joins the workspace. It
 receives the workspace context without the new window and a window table with
-the same fields as `ctx.windows` entries. Return a 1-based position in the
-tiled order, or nothing to append:
+the same fields as `ctx.windows` entries; its `x`/`y`/`w`/`h` are the client's
+requested size clipped and centred on the work area, because no layout has
+placed it yet. Return a 1-based position in the tiled order, or nothing to
+append:
 
 ```lua
 insert = function(ctx, window)
@@ -799,6 +801,11 @@ end
 
 The hook only runs for named Lua layouts; the built-in `columns` layout always
 appends.
+
+After the window joins the workspace, `arrange` runs once before the window is
+mapped, and the rectangle it returns is where the window opens. A mapping
+window therefore fades in at its final slot and does not flash at a centered
+position first.
 
 [`docs/examples/scrolling.lua`](examples/scrolling.lua) is a complete
 one-window-per-column scrolling layout built from these pieces: per-workspace
