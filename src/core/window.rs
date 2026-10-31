@@ -301,6 +301,10 @@ pub fn on_window_destroyed(state: &mut State, root: &WlSurface) {
         .layout
         .by_root(root)
         .and_then(|managed| return state.core.layout.workspace_of(managed.id));
+    // The layout neighbour that should inherit the keyboard. Looked up before
+    // `remove_window`, because the closed window has to still be in the list
+    // for its position to tell us which window came before it.
+    let preferred_focus = focus_fallback(state, root);
 
     // The layout must forget the window before `refresh` drops it from the
     // space, otherwise it would keep a dead element in its ordering.
@@ -314,7 +318,7 @@ pub fn on_window_destroyed(state: &mut State, root: &WlSurface) {
     state.core.space.refresh();
 
     if held_focus {
-        focus_next_window(state, previous_workspace);
+        focus_next_window(state, previous_workspace, preferred_focus);
     }
 
     LayoutManager::relayout(state);
@@ -461,32 +465,20 @@ fn keyboard_focused_on(state: &State, root: &WlSurface) -> bool {
 ///
 /// `workspace` is where the removed window lived. When it is known, only
 /// windows on that workspace are candidates: closing a window must not move
-/// focus to a window on a workspace that is currently off screen. When the
-/// output or workspace is already gone, fall back to the topmost window in the
-/// whole space.
-fn focus_next_window(state: &mut State, workspace: Option<(smithay::output::Output, usize)>) {
-    // Space elements are stored back to front; the last one is on top.
-    let next = match workspace {
-        Some((output, index)) => {
-            let Some(ids) = state.core.layout.workspace_ids(&output, index) else {
-                return focus_next_window(state, None);
-            };
-            state
-                .core
-                .space
-                .elements()
-                .rev()
-                .find(|window| {
-                    return state
-                        .core
-                        .layout
-                        .by_window(window)
-                        .is_some_and(|managed| return ids.contains(&managed.id));
-                })
-                .cloned()
-        }
-        None => state.core.space.elements().last().cloned(),
-    };
+/// focus to a window on a workspace that is currently off screen.
+///
+/// `preferred` is the layout neighbour the closed window handed focus to (see
+/// [`LayoutManager::focus_fallback`]), resolved before the window left the
+/// ordering. Without it, or when that window is gone too, the topmost window
+/// of the workspace takes over, and finally the topmost window in the space.
+fn focus_next_window(
+    state: &mut State,
+    workspace: Option<(smithay::output::Output, usize)>,
+    preferred: Option<u64>,
+) {
+    let next = preferred
+        .and_then(|id| return state.core.layout.window_handle(id))
+        .or_else(|| return topmost_window(state, workspace));
     match next {
         Some(next) => {
             let surface = next.wl_surface().map(|surface| return surface.into_owned());
@@ -498,6 +490,41 @@ fn focus_next_window(state: &mut State, workspace: Option<(smithay::output::Outp
             }
         }
     }
+}
+
+/// The topmost remaining window of `workspace`, or of the whole space.
+fn topmost_window(
+    state: &State,
+    workspace: Option<(smithay::output::Output, usize)>,
+) -> Option<Window> {
+    let Some((output, index)) = workspace else {
+        return state.core.space.elements().last().cloned();
+    };
+    let Some(ids) = state.core.layout.workspace_ids(&output, index) else {
+        return state.core.space.elements().last().cloned();
+    };
+    // Space elements are stored back to front; the last one is on top.
+    return state
+        .core
+        .space
+        .elements()
+        .rev()
+        .find(|window| {
+            return state
+                .core
+                .layout
+                .by_window(window)
+                .is_some_and(|managed| return ids.contains(&managed.id));
+        })
+        .cloned();
+}
+
+/// The window `root` hands the keyboard to when it goes away, looked up while
+/// it is still part of the workspace ordering.
+fn focus_fallback(state: &State, root: &WlSurface) -> Option<u64> {
+    let managed = state.core.layout.by_root(root)?;
+    let (output, index) = state.core.layout.workspace_of(managed.id)?;
+    return state.core.layout.focus_fallback(&output, index, managed.id);
 }
 
 /// Put a window back into the unmapped set and refund its buffers.
@@ -512,6 +539,9 @@ pub fn unmap_window(state: &mut State, root: &WlSurface, window: Window) {
         .layout
         .by_root(root)
         .and_then(|managed| return state.core.layout.workspace_of(managed.id));
+    // Same as in `on_window_destroyed`: resolve the layout neighbour while the
+    // window still has a position in the list.
+    let preferred_focus = focus_fallback(state, root);
 
     LayoutManager::remove_window(state, root);
     if let Some(closing) = closing {
@@ -528,7 +558,7 @@ pub fn unmap_window(state: &mut State, root: &WlSurface, window: Window) {
 
     // The keyboard must not point at a window that left the screen.
     if held_focus {
-        focus_next_window(state, previous_workspace);
+        focus_next_window(state, previous_workspace, preferred_focus);
     }
 
     LayoutManager::relayout(state);

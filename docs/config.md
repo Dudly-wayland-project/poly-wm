@@ -366,6 +366,12 @@ Actions without arguments:
 | `move-workspace-up`, `move-workspace-down` | Swap the active workspace with its neighbour. |
 | `toggle-overview` | Open or close the workspace overview. |
 
+Closing or unmapping the focused window hands the keyboard to its neighbour in
+the layout order: the window before it in `ctx.windows`, or the one after it
+when it was the first. Floating windows hand focus to the floating neighbour
+first and fall back to the topmost window of the other list. Focus therefore
+stays where the window was instead of jumping to whichever window mapped last.
+
 Actions with arguments are written as tables in Lua:
 
 | Lua form | Effect |

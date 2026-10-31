@@ -244,6 +244,40 @@ impl Workspace {
     }
 }
 
+/// Where focus should go when `id` disappears from a workspace.
+///
+/// The order is: the window before `id` in the tiled list (its left neighbour
+/// in a column layout), then the window after it (when it was first), then the
+/// same two slots in the floating list, then the other list's last window.
+///
+/// Walking the list order rather than the space stack is what makes closing a
+/// window feel local: the space stack is mapping order, so it would focus
+/// whatever window happened to be mapped last.
+fn focus_candidates(tiled: &[u64], floating: &[u64], id: u64) -> Vec<u64> {
+    let neighbours = |list: &[u64]| {
+        let mut found = Vec::new();
+        let Some(position) = list.iter().position(|entry| return *entry == id) else {
+            return found;
+        };
+        if let Some(before) = position.checked_sub(1).and_then(|at| return list.get(at)) {
+            found.push(*before);
+        }
+        if let Some(after) = list.get(position + 1) {
+            found.push(*after);
+        }
+        return found;
+    };
+    let mut candidates = neighbours(tiled);
+    candidates.extend(neighbours(floating));
+    let other_list = if floating.contains(&id) {
+        tiled.last()
+    } else {
+        floating.last()
+    };
+    candidates.extend(other_list.copied());
+    return candidates;
+}
+
 /// The vertical workspace stack of one output.
 #[derive(Debug)]
 struct OutputLayout {
@@ -664,6 +698,14 @@ impl LayoutManager {
         return self.by_root(&root_surface(&surface));
     }
 
+    /// The Smithay handle of the managed window `id`.
+    pub fn window_handle(&self, id: u64) -> Option<Window> {
+        return self
+            .windows
+            .get(&id)
+            .map(|managed| return managed.window.clone());
+    }
+
     /// The index of the workspace that owns `output`'s screen.
     pub fn active_workspace(&self, output: &smithay::output::Output) -> usize {
         return self
@@ -704,6 +746,27 @@ impl LayoutManager {
                 .copied()
                 .collect(),
         );
+    }
+
+    /// The window that should take focus when `id` leaves workspace `index`.
+    ///
+    /// Focus follows the layout order, not the mapping order: a closed window
+    /// hands the keyboard to the window before it in the tiled list (its left
+    /// neighbour in a column layout), or to the one after it when it was the
+    /// first. Only when that list has no other window does the floating list
+    /// get a say. Walking the space stack instead would land on whatever
+    /// window mapped last, which is rarely where the user came from.
+    pub(crate) fn focus_fallback(
+        &self,
+        output: &smithay::output::Output,
+        index: usize,
+        id: u64,
+    ) -> Option<u64> {
+        let layout = self.outputs.get(output)?;
+        let workspace = layout.workspaces.get(index)?;
+        return focus_candidates(&workspace.tiled, &workspace.floating, id)
+            .into_iter()
+            .find(|candidate| return self.windows.contains_key(candidate));
     }
 
     /// The workspace stack of `output`, projected for drawing at `now`.
@@ -3875,6 +3938,39 @@ mod tests {
         let windows = column_layout(&[1, 2], &[], inset, 8);
         assert_eq!(windows.get(&1), Some(&area(8, 8, 948, 1064)));
         assert_eq!(windows.get(&2), Some(&area(964, 8, 948, 1064)));
+    }
+
+    #[test]
+    fn closing_a_window_focuses_its_layout_neighbour() {
+        // The tiled list is layout order, not mapping order. A window in the
+        // middle hands focus to its left neighbour, which is the column the
+        // user came from, not the last window in the workspace.
+        let tiled = [10, 11, 12];
+        assert_eq!(focus_candidates(&tiled, &[], 11), vec![10, 12]);
+        // The first window has no left neighbour, so focus goes right.
+        assert_eq!(focus_candidates(&tiled, &[], 10), vec![11]);
+        // The last one goes left.
+        assert_eq!(focus_candidates(&tiled, &[], 12), vec![11]);
+    }
+
+    #[test]
+    fn closing_a_window_prefers_its_own_list() {
+        let tiled = [10, 11];
+        let floating = [20, 21];
+        // A floating window hands focus to the floating neighbour first, then
+        // falls back to the topmost tiled window.
+        assert_eq!(focus_candidates(&tiled, &floating, 20), vec![21, 11]);
+        // A tiled window falls back to the topmost floating window only after
+        // its tiled neighbours are exhausted.
+        assert_eq!(focus_candidates(&tiled, &floating, 11), vec![10, 21]);
+        // A lone tiled window hands focus to the topmost floating one.
+        assert_eq!(focus_candidates(&[10], &floating, 10), vec![21]);
+    }
+
+    #[test]
+    fn a_lone_window_has_no_focus_candidate() {
+        assert!(focus_candidates(&[10], &[], 10).is_empty());
+        assert!(focus_candidates(&[], &[], 10).is_empty());
     }
 
     #[test]
