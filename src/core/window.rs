@@ -220,8 +220,8 @@ pub fn map_window(state: &mut State, root: &WlSurface) {
     window.on_commit();
 
     let focus_on_map = LayoutManager::should_focus_on_map(state, &window);
-    LayoutManager::map_window(state, &window, root);
-    create_foreign_toplevel(state, &window, root);
+    let window_id = LayoutManager::map_window(state, &window, root);
+    create_foreign_toplevel(state, &window, root, window_id);
     if focus_on_map {
         focus_window(
             state,
@@ -236,14 +236,18 @@ pub fn map_window(state: &mut State, root: &WlSurface) {
 }
 
 /// Publish the window to taskbars (`ext-foreign-toplevel-list-v1`).
-fn create_foreign_toplevel(state: &mut State, window: &Window, root: &WlSurface) {
+///
+/// The identifier is the same stable id the IPC reports, so a taskbar can use
+/// it directly with `focus-window`/`close-window` instead of matching titles.
+fn create_foreign_toplevel(state: &mut State, window: &Window, root: &WlSurface, id: u64) {
     let identity = window_title_and_app_id(window);
     let handle = state
         .core
         .foreign_toplevel_list_state
-        .new_toplevel::<State>(
+        .new_toplevel_with_identifier::<State>(
             identity.title.unwrap_or_default(),
             identity.app_id.unwrap_or_default(),
+            id.to_string(),
         );
     state.core.foreign_toplevels.insert(root.clone(), handle);
 }
