@@ -1,8 +1,12 @@
 //! `ext-image-copy-capture-v1` + `ext-image-capture-source-v1`.
 //!
 //! This is what `grim`, `wl-mirror`, screen recorders and `xdg-desktop-portal`
-//! screencasts use on Poly; `wlr-screencopy-unstable-v1` is not implemented on
-//! purpose, because those clients prefer the `ext` pair when both exist.
+//! screencasts use on Poly, and they prefer this pair over
+//! `wlr-screencopy-unstable-v1` whenever both are offered. The older protocol is
+//! implemented too, for the clients that only know it
+//! (`handlers/screencopy.rs`); it shares the rendering and readback code but not
+//! this session machinery, because a screencopy frame is copied once and thrown
+//! away.
 //!
 //! Capture is on demand: a frame is rendered as soon as the client calls
 //! `capture`, from the live window/layer state, into the client's own shm
@@ -19,18 +23,20 @@
 //! toplevel source manager and refuse to run.
 
 use smithay::output::Output;
+use smithay::reexports::wayland_server::protocol::wl_pointer::WlPointer;
 use smithay::reexports::wayland_server::protocol::wl_shm;
-use smithay::utils::{Size, Transform};
+use smithay::utils::{Buffer, Point, Rectangle, Scale, Size, Transform};
 use smithay::wayland::image_capture_source::{
     ImageCaptureSource, ImageCaptureSourceHandler, OutputCaptureSourceHandler,
     OutputCaptureSourceState,
 };
 use smithay::wayland::image_copy_capture::{
-    BufferConstraints, CaptureFailureReason, Frame, FrameRef, ImageCopyCaptureHandler,
-    ImageCopyCaptureState, Session, SessionRef,
+    BufferConstraints, CaptureFailureReason, CursorSession, CursorSessionRef, Frame, FrameRef,
+    ImageCopyCaptureHandler, ImageCopyCaptureState, Session, SessionRef,
 };
 use tracing::{debug, info, warn};
 
+use crate::core::Core;
 use crate::core::capture::CaptureKey;
 use crate::state::State;
 
@@ -144,6 +150,88 @@ impl ImageCopyCaptureHandler for State {
         let _ = frame;
     }
 
+    /// What a client has to allocate to receive the pointer sprite.
+    ///
+    /// Without this the whole cursor session is refused (Smithay marks it
+    /// stopped), and a client that only wants the cursor — a screenshot tool
+    /// drawing it onto a capture, a portal showing it in a preview — falls back
+    /// to waiting out its timeout with no cursor at all.
+    fn cursor_capture_constraints(
+        &mut self,
+        source: &ImageCaptureSource,
+        _pointer: &WlPointer,
+    ) -> Option<BufferConstraints> {
+        let output = source_output(source)?;
+        let integer = output.current_scale().integer_scale();
+        let size = crate::core::render::cursor_capture_size(&self.core, integer)?;
+        // `Argb8888` and not `Xrgb8888`: the sprite is composited by the
+        // client, so everything around it has to stay transparent.
+        return Some(BufferConstraints {
+            size: Size::from((size.w, size.h)),
+            shm: vec![wl_shm::Format::Argb8888],
+            dma: None,
+        });
+    }
+
+    fn new_cursor_session(&mut self, session: CursorSession) {
+        // The hotspot has to be in place before `enter`, which carries it.
+        if let Some(output) = source_output(&session.source()) {
+            let integer = output.current_scale().integer_scale();
+            session.set_cursor_hotspot(crate::core::render::cursor_capture_hotspot(
+                &self.core,
+                integer,
+            ));
+            announce_cursor_position(&session, &self.core, &output);
+        }
+        // Dropping the value stops the session, so it has to outlive this call.
+        self.core.cursor_sessions.push(session);
+    }
+
+    fn cursor_frame(&mut self, session: &CursorSessionRef, frame: Frame) {
+        let Some(output) = source_output(&session.source()) else {
+            warn!("cursor frame dropped: the session's output is gone");
+            frame.fail(CaptureFailureReason::Unknown);
+            return;
+        };
+        let buffer = frame.buffer();
+        let State {
+            backend,
+            core,
+            capture: _,
+        } = self;
+        let captured = backend
+            .with_gles_renderer_for_output(&output, |renderer| {
+                return crate::core::render::capture_cursor(core, renderer, &output, &buffer);
+            })
+            .unwrap_or_else(|| {
+                return Err(anyhow::anyhow!("no renderer for output {}", output.name()));
+            });
+        match captured {
+            Ok(()) => {
+                // `None` means "everything is new", which is what a buffer the
+                // client is about to composite from scratch contains.
+                frame.success(
+                    Transform::Normal,
+                    None::<Vec<Rectangle<i32, Buffer>>>,
+                    core.start_time.elapsed(),
+                );
+            }
+            Err(err) => {
+                warn!(
+                    "error capturing the cursor of {}: {err}",
+                    output.name()
+                );
+                frame.fail(CaptureFailureReason::Unknown);
+            }
+        }
+    }
+
+    fn cursor_session_destroyed(&mut self, session: CursorSessionRef) {
+        self.core
+            .cursor_sessions
+            .retain(|live| return **live != session);
+    }
+
     fn session_destroyed(&mut self, session: SessionRef) {
         if let Some(key) = session.user_data().get::<CaptureKey>().copied() {
             self.capture.remove(key);
@@ -240,6 +328,84 @@ pub(crate) fn refresh_sessions(state: &mut State) {
     for (index, name) in stopped.into_iter().rev() {
         state.core.image_copy_sessions.remove(index);
         info!("stopped a capture session for {name}");
+    }
+}
+
+/// Where the pointer hotspot sits on `output`, in buffer pixels.
+///
+/// This is what `ext_image_copy_capture_cursor_session_v1.position` reports:
+/// the hotspot relative to the capture source's origin, so the client can
+/// composite the sprite where it belongs without knowing the output layout.
+fn cursor_position(core: &Core, output: &Output) -> Option<Point<i32, Buffer>> {
+    let geometry = core.space.output_geometry(output)?;
+    let pointer = core.pointer_location();
+    if !geometry.to_f64().contains(pointer) {
+        return None;
+    }
+    let scale = Scale::from(output.current_scale().fractional_scale());
+    let position = (pointer - geometry.loc.to_f64())
+        .to_physical(scale)
+        .to_i32_round();
+    return Some(Point::from((position.x, position.y)));
+}
+
+/// Tell a freshly created cursor session where the pointer is.
+///
+/// A pointer that is not on the captured output still has to be mentioned once:
+/// a client decides there is no cursor to draw when it sees `leave`, and a
+/// session that never sends `enter` or `leave` leaves it waiting out a timeout.
+fn announce_cursor_position(session: &CursorSessionRef, core: &Core, output: &Output) {
+    match cursor_position(core, output) {
+        Some(position) => session.set_cursor_pos(Some(position)),
+        None => {
+            session.set_cursor_pos(Some(Point::from((0, 0))));
+            session.set_cursor_pos(None);
+        }
+    }
+}
+
+/// Keep the live cursor sessions in sync with the pointer.
+///
+/// The protocol has no "the cursor changed" announcement of its own: position,
+/// hotspot and buffer constraints are pull-shaped, so they are refreshed from
+/// the event loop. `set_cursor_pos` and `set_cursor_hotspot` are no-ops when
+/// nothing changed, and the constraints are only re-sent when the sprite
+/// changes size — a client that allocated a 24x24 buffer would otherwise be
+/// handed a 32x32 frame.
+pub(crate) fn refresh_cursor_sessions(core: &Core) {
+    if core.cursor_sessions.is_empty() {
+        return;
+    }
+    let mut updates = Vec::with_capacity(core.cursor_sessions.len());
+    for session in &core.cursor_sessions {
+        let Some(output) = source_output(&session.source()) else {
+            updates.push(None);
+            continue;
+        };
+        let integer = output.current_scale().integer_scale();
+        updates.push(Some((
+            cursor_position(core, &output),
+            crate::core::render::cursor_capture_hotspot(core, integer),
+            crate::core::render::cursor_capture_size(core, integer),
+        )));
+    }
+    for (session, update) in core.cursor_sessions.iter().zip(updates) {
+        let Some((position, hotspot, size)) = update else {
+            continue;
+        };
+        session.set_cursor_hotspot(hotspot);
+        session.set_cursor_pos(position);
+        let Some(size) = size else {
+            continue;
+        };
+        let constraints = BufferConstraints {
+            size: Size::from((size.w, size.h)),
+            shm: vec![wl_shm::Format::Argb8888],
+            dma: None,
+        };
+        if constraints_stale(session.current_constraints().as_ref(), &constraints) {
+            session.update_constraints(constraints);
+        }
     }
 }
 

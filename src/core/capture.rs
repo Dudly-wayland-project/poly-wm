@@ -36,6 +36,15 @@
 //! [`CaptureOutcome::Unchanged`]: only the damage events are skipped, the buffer
 //! still holds the current picture. A buffer the session never wrote gets a full
 //! readback, which is what makes a brand new buffer complete.
+//!
+//! `zwlr_screencopy` is the other shape of the same problem: a frame object
+//! lives for exactly one copy, so there is nothing to remember per buffer and
+//! nothing to accumulate. The client always gets a complete picture, which is
+//! what a client that never received `damage` events is entitled to expect. What
+//! is still worth keeping is the offscreen texture: a recorder copies a frame
+//! every refresh, and allocating a full-screen texture sixty times a second
+//! would cost more than the capture itself. [`ScreencopyTarget`] holds one of
+//! those per output.
 
 use std::collections::HashMap;
 
@@ -45,6 +54,7 @@ use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::Element;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTarget, GlesTexture};
 use smithay::backend::renderer::{Bind, ExportMem, Offscreen};
+use smithay::output::WeakOutput;
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::backend::ObjectId;
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
@@ -76,10 +86,17 @@ const MAX_READBACK_REGIONS: usize = 16;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CaptureKey(u64);
 
-/// The capture sessions of the compositor.
+/// The capture sessions of the compositor, plus the one-shot targets that
+/// `zwlr_screencopy` frames draw into.
 #[derive(Default)]
 pub struct CaptureState {
     sessions: HashMap<CaptureKey, SessionCapture>,
+    /// One target per output, keyed by output name.
+    ///
+    /// The name identifies an output for as long as it exists. A target whose
+    /// output is gone is dropped on the next lookup, so a hot-plug loop cannot
+    /// pile up full-screen textures.
+    screencopy: HashMap<String, ScreencopyTarget>,
     next_key: u64,
 }
 
@@ -125,6 +142,41 @@ impl CaptureState {
             .sessions
             .get_mut(&key)
             .context("the capture session vanished right after it was created");
+    }
+
+    /// The screencopy target for `output`, (re)created when the output changed
+    /// size or scale.
+    ///
+    /// Unlike a session, a target is not keyed by protocol object: a screencopy
+    /// frame is one copy and then gone, and the clients that matter (`grim`,
+    /// `wf-recorder`) create a new frame object for every refresh.
+    pub fn screencopy_target(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        name: &str,
+        output: WeakOutput,
+        size: Size<i32, Physical>,
+        scale: Scale<f64>,
+    ) -> anyhow::Result<&mut ScreencopyTarget> {
+        // Targets outlive the outputs they were made for; dropping the orphaned
+        // ones here keeps the map (and its textures) bounded by the number of
+        // outputs that actually exist.
+        self.screencopy
+            .retain(|_, target| return target.output.upgrade().is_some());
+        let stale = match self.screencopy.get(name) {
+            Some(target) => target.size != size || target.scale != scale,
+            None => true,
+        };
+        if stale {
+            self.screencopy.insert(
+                String::from(name),
+                ScreencopyTarget::new(renderer, output, size, scale)?,
+            );
+        }
+        return self
+            .screencopy
+            .get_mut(name)
+            .context("the screencopy target vanished right after it was created");
     }
 }
 
@@ -262,7 +314,18 @@ impl SessionCapture {
             ReadbackPlan::Full => vec![Rectangle::from_size(buffer_size)],
             ReadbackPlan::Regions(regions) => regions.clone(),
         };
-        copy_into_shm(buffer, buffer_size, renderer, &target, &regions)?;
+        // A session always copies the whole output into a buffer of the same
+        // size, so the framebuffer, the buffer and the source origin coincide.
+        copy_into_shm(
+            buffer,
+            buffer_size,
+            buffer_size,
+            renderer,
+            &target,
+            Point::from((0, 0)),
+            &regions,
+            Fourcc::Xrgb8888,
+        )?;
 
         // The new backlog: every other buffer is now missing this frame's
         // changes, and this one is missing nothing.
@@ -285,6 +348,79 @@ impl SessionCapture {
             ReadbackPlan::Full => CaptureOutcome::Full(buffer_size),
             ReadbackPlan::Regions(regions) => CaptureOutcome::Damage(regions),
         });
+    }
+}
+
+/// The offscreen state one output keeps for `zwlr_screencopy` frames.
+///
+/// Every copy repaints the whole target and reads the whole requested region
+/// back: a single frame has no history to compare against, and a client that
+/// never saw a `damage` event is entitled to a complete picture. The tracker is
+/// fed `age = 0` for exactly that reason — it drops its history and reports the
+/// full output as damage.
+pub struct ScreencopyTarget {
+    output: WeakOutput,
+    size: Size<i32, Physical>,
+    scale: Scale<f64>,
+    tracker: OutputDamageTracker,
+    texture: GlesTexture,
+}
+
+impl ScreencopyTarget {
+    fn new(
+        renderer: &mut GlesRenderer,
+        output: WeakOutput,
+        size: Size<i32, Physical>,
+        scale: Scale<f64>,
+    ) -> anyhow::Result<Self> {
+        let buffer_size: Size<i32, Buffer> = Size::from((size.w, size.h));
+        let texture = renderer.create_buffer(Fourcc::Xrgb8888, buffer_size)?;
+        return Ok(Self {
+            output,
+            size,
+            scale,
+            // `Transform::Normal` for the same reason the session tracker uses
+            // it: the frame is reported with flags 0, so the client expects an
+            // unrotated picture regardless of the backend's own transform.
+            tracker: OutputDamageTracker::new(size, scale, Transform::Normal),
+            texture,
+        });
+    }
+
+    /// Draw the current scene and copy `src` out of it into `buffer`.
+    ///
+    /// `src` is in framebuffer pixels and the client's buffer is exactly
+    /// `src.size` large, so the copy lands at the buffer's origin.
+    pub fn capture_region(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        elements: &[OutputElements<GlesRenderer>],
+        background: [f32; 4],
+        buffer: &WlBuffer,
+        src: Rectangle<i32, Physical>,
+    ) -> anyhow::Result<()> {
+        let buffer_size: Size<i32, Buffer> = Size::from((src.size.w, src.size.h));
+        if buffer_size.w <= 0 || buffer_size.h <= 0 {
+            anyhow::bail!("the captured region is empty");
+        }
+        let frame_size: Size<i32, Buffer> = Size::from((self.size.w, self.size.h));
+        let src = to_buffer(src);
+        let mut target = renderer.bind(&mut self.texture)?;
+        // `age = 0`: nothing from an earlier frame can be reused, because this
+        // frame is the only one the client will ever look at.
+        self.tracker
+            .render_output(renderer, &mut target, 0, elements, background)?;
+        copy_into_shm(
+            buffer,
+            buffer_size,
+            frame_size,
+            renderer,
+            &target,
+            src.loc,
+            &[Rectangle::from_size(buffer_size)],
+            Fourcc::Xrgb8888,
+        )?;
+        return Ok(());
     }
 }
 
@@ -352,22 +488,39 @@ pub fn plan_readback(
 /// GL row 0, and `glReadPixels` returns rows in increasing GL order — the
 /// top-down order the client wants). The client picks stride and offset, so only
 /// the region's own `width * 4` bytes of each row can be written.
+///
+/// `src_origin` is where buffer pixel `(0, 0)` comes from in the framebuffer:
+/// `(0, 0)` for a session, which captures the whole output into a same-sized
+/// buffer, and the region's own origin for a `zwlr_screencopy` region capture,
+/// where the client's buffer is only as large as the region. `frame` is the size
+/// of the framebuffer itself, and bounds every source rectangle.
+///
+/// `format` is the pixel format of the client's buffer, and the one the
+/// framebuffer is read back as: `Xrgb8888` for a screenshot, `Argb8888` for the
+/// pointer, which is composited by the client and needs its surroundings
+/// transparent.
+#[allow(clippy::too_many_arguments)]
 fn copy_into_shm(
     buffer: &WlBuffer,
     size: Size<i32, Buffer>,
+    frame: Size<i32, Buffer>,
     renderer: &mut GlesRenderer,
     target: &GlesTarget<'_>,
+    src_origin: Point<i32, Buffer>,
     regions: &[Rectangle<i32, Buffer>],
+    format: Fourcc,
 ) -> anyhow::Result<()> {
     let row_len = usize::try_from(size.w)? * 4;
     let height = usize::try_from(size.h)?;
+    let shm_format = match format {
+        Fourcc::Argb8888 => wl_shm::Format::Argb8888,
+        _ => wl_shm::Format::Xrgb8888,
+    };
     // One `with_buffer_contents_mut` for all regions: it locks the pool, so
     // calling it once per region would be needlessly slow.
     shm::with_buffer_contents_mut(buffer, |ptr, pool_len, data| {
         anyhow::ensure!(
-            data.format == wl_shm::Format::Xrgb8888
-                && data.width == size.w
-                && data.height == size.h,
+            data.format == shm_format && data.width == size.w && data.height == size.h,
             "capture buffer does not match the announced constraints"
         );
         let offset = usize::try_from(data.offset)?;
@@ -391,7 +544,16 @@ fn copy_into_shm(
                 byte_x + region_row <= row_len && y0 + region_height <= height,
                 "capture damage lies outside the buffer"
             );
-            let mapping = renderer.copy_framebuffer(target, *region, Fourcc::Xrgb8888)?;
+            // The same rectangle in the framebuffer, shifted by the origin.
+            let src = source_rect(*region, src_origin);
+            anyhow::ensure!(
+                src.loc.x >= 0
+                    && src.loc.y >= 0
+                    && src.loc.x + src.size.w <= frame.w
+                    && src.loc.y + src.size.h <= frame.h,
+                "capture source lies outside the framebuffer"
+            );
+            let mapping = renderer.copy_framebuffer(target, src, format)?;
             let pixels = renderer.map_texture(&mapping)?;
             anyhow::ensure!(
                 pixels.len() >= region_row * region_height,
@@ -415,6 +577,45 @@ fn copy_into_shm(
 
 fn area(rect: Rectangle<i32, Physical>) -> i64 {
     return i64::from(rect.size.w) * i64::from(rect.size.h);
+}
+
+/// Copy a rendered cursor image into the client's shm buffer.
+///
+/// The cursor is the one capture that needs an alpha channel: a pointer is a
+/// sprite, and `Xrgb8888` would paint everything outside it black instead of
+/// letting the client composite it over the screenshot.
+pub fn copy_cursor_into_shm(
+    buffer: &WlBuffer,
+    size: Size<i32, Buffer>,
+    renderer: &mut GlesRenderer,
+    target: &GlesTarget<'_>,
+) -> anyhow::Result<()> {
+    return copy_into_shm(
+        buffer,
+        size,
+        size,
+        renderer,
+        target,
+        Point::from((0, 0)),
+        &[Rectangle::from_size(size)],
+        Fourcc::Argb8888,
+    );
+}
+
+/// Where a buffer region is read from in the framebuffer.
+///
+/// A session copies the whole output into a same-sized buffer, so the origin is
+/// zero and source and destination coincide. A `zwlr_screencopy` region capture
+/// gets a buffer that is only as large as the region, so every buffer
+/// coordinate has to be shifted by the region's origin.
+fn source_rect(
+    region: Rectangle<i32, Buffer>,
+    origin: Point<i32, Buffer>,
+) -> Rectangle<i32, Buffer> {
+    return Rectangle::new(
+        Point::from((origin.x + region.loc.x, origin.y + region.loc.y)),
+        Size::from((region.size.w, region.size.h)),
+    );
 }
 
 /// Byte offset of the pixel (`x`, `y`) inside a buffer with `stride` bytes per
@@ -483,6 +684,34 @@ mod tests {
 
     fn size(w: i32, h: i32) -> Size<i32, Physical> {
         return Size::from((w, h));
+    }
+
+    fn buffer_rect(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Buffer> {
+        return Rectangle::new(Point::from((x, y)), Size::from((w, h)));
+    }
+
+    #[test]
+    fn a_session_reads_from_the_framebuffer_origin() {
+        assert_eq!(
+            source_rect(buffer_rect(0, 0, 1920, 1080), Point::from((0, 0))),
+            buffer_rect(0, 0, 1920, 1080)
+        );
+    }
+
+    #[test]
+    fn a_region_capture_reads_from_the_regions_origin() {
+        // Regression guard for the region path: the client's buffer starts at
+        // (0, 0) but the pixels come from the region's place in the output, so
+        // reading at the buffer's own coordinates would capture the wrong part
+        // of the screen — and silently, because the sizes still match.
+        assert_eq!(
+            source_rect(buffer_rect(0, 0, 400, 300), Point::from((100, 50))),
+            buffer_rect(100, 50, 400, 300)
+        );
+        assert_eq!(
+            source_rect(buffer_rect(10, 20, 30, 40), Point::from((100, 50))),
+            buffer_rect(110, 70, 30, 40)
+        );
     }
 
     #[test]

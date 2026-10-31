@@ -35,9 +35,12 @@ pub use elements::{
 };
 pub use shaders::Shaders;
 
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use smithay::backend::allocator::Fourcc;
+use smithay::backend::renderer::damage::OutputDamageTracker;
+use smithay::backend::renderer::element::Id;
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::element::NamespacedElement;
 use smithay::backend::renderer::element::RenderElementStates;
@@ -66,7 +69,8 @@ use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::user_data::UserDataMap;
 use smithay::utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Size, Transform};
-use smithay::wayland::compositor::with_states;
+use smithay::wayland::background_effect::BackgroundEffectSurfaceCachedState;
+use smithay::wayland::compositor::{RectangleKind, with_states};
 use smithay::wayland::shell::wlr_layer::Layer;
 use tracing::{debug, warn};
 
@@ -79,8 +83,9 @@ use crate::core::layout::FullscreenMode;
 use crate::core::layout::LayoutManager;
 use crate::core::layout::WorkspaceView;
 
+use self::blur::{BlurElement, BlurOptions};
 use self::decorations::DecorationInputs;
-use self::visual::WindowVisuals;
+use self::visual::{CornerRadius, WindowVisuals};
 
 /// Clients get at most one frame callback per this interval, even if we render
 /// faster than the output refreshes (`docs/plan.md` §9.4).
@@ -100,6 +105,10 @@ where
     R: PolyRenderer,
     R::TextureId: Clone + Send + 'static,
 {
+    // Cursor capture sessions are pull-shaped: the pointer position, the
+    // hotspot and the sprite size are only read when the compositor says so.
+    crate::core::handlers::refresh_cursor_sessions(core);
+
     // Shaders are compiled lazily, on the first frame and after a reload or an
     // edit of a shader file (`docs/plan.md` §10.3, §10.4). A failing file keeps
     // the previous program and reports through a Toast.
@@ -239,13 +248,29 @@ where
 
     // Front to back. The cursor is already first. Overlay layers always stay
     // above a fullscreen window; Top layers can be covered by it.
-    push_layers(&mut elements, renderer, output, &[Layer::Overlay], scale);
+    push_layers(
+        &mut elements,
+        core,
+        renderer,
+        output,
+        &[Layer::Overlay],
+        scale,
+        time,
+    );
     push_toasts(&mut elements, core, renderer, output, scale);
     // In the overview a fullscreen window is just another card, so it must not
     // cover the Top layer (the bar stays visible above the cards).
     let cover_top = !overview && core.config.fullscreen.cover_top_layer && !fullscreen.is_empty();
     if !cover_top {
-        push_layers(&mut elements, renderer, output, &[Layer::Top], scale);
+        push_layers(
+            &mut elements,
+            core,
+            renderer,
+            output,
+            &[Layer::Top],
+            scale,
+            time,
+        );
     }
 
     // In the overview a compositor-managed fullscreen window is just another
@@ -296,7 +321,15 @@ where
     }
 
     if cover_top {
-        push_layers(&mut elements, renderer, output, &[Layer::Top], scale);
+        push_layers(
+            &mut elements,
+            core,
+            renderer,
+            output,
+            &[Layer::Top],
+            scale,
+            time,
+        );
     }
     push_closing(
         &mut elements,
@@ -379,10 +412,12 @@ where
     }
     push_layers(
         &mut elements,
+        core,
         renderer,
         output,
         &[Layer::Bottom, Layer::Background],
         scale,
+        time,
     );
 
     return elements;
@@ -896,6 +931,25 @@ fn push_window<R>(
         .is_some_and(|root| return root == &managed.root);
     let cursor = window_cursor(core, managed.rect);
 
+    // `ext-background-effect-v1`: the client may ask for only part of its window
+    // to be blurred. `general.blur.enable` stays the master switch — it decides
+    // whether the window has blur parameters at all — while
+    // `accept_client_regions` decides whether the client's region replaces the
+    // whole-window backdrop. The surface state is only read when this window
+    // could blur at all: otherwise the common case pays a lock per frame for
+    // nothing.
+    let blur_region = if visuals.blur.is_none() {
+        None
+    } else {
+        client_blur_region(
+            core.config.general.blur.accept_client_regions,
+            &managed.root,
+            local_rect,
+            geometry,
+            rescale,
+        )
+    };
+
     let inputs = DecorationInputs {
         id: managed.id,
         rect: local_rect,
@@ -907,6 +961,7 @@ fn push_window<R>(
         time,
         cursor,
         clip: Some(card_rect),
+        blur_region: blur_region.as_deref(),
     };
     let decorations = core.decorations.prepare(&inputs, &core.shaders);
 
@@ -1048,6 +1103,87 @@ fn push_window<R>(
     }
 }
 
+/// The blur region a client set on a window, in output-local logical
+/// coordinates.
+///
+/// `ext-background-effect-v1` stores the region in *surface-local* logical
+/// coordinates. The surface tree is drawn at `local_rect.loc` shifted by the
+/// surface geometry offset and scaled by the opening animation, so a surface
+/// point maps to `local_rect.loc + (point - geometry.loc) * rescale` — the same
+/// transform `push_window` uses for the window's own geometry.
+///
+/// `None` means "the client never asked for a region" and keeps the configured
+/// whole-window backdrop; `Some(&[])` means it asked for none, which disables
+/// the blur. The rects are not clipped to the window here;
+/// `decorations::client_regions` clips them once the drawn rectangle is known.
+fn client_blur_region(
+    accept: bool,
+    root: &WlSurface,
+    local_rect: Rectangle<i32, Logical>,
+    geometry: Rectangle<i32, Logical>,
+    rescale: Scale<f64>,
+) -> Option<Vec<Rectangle<i32, Logical>>> {
+    if !accept {
+        return None;
+    }
+    // A client that never mentioned blur keeps the configured whole-window
+    // backdrop. One that did gets exactly what it asked for — including the
+    // null region Noctalia sends to switch blur off, which has to stay
+    // distinguishable from silence (see `handlers/background_effect.rs`).
+    if !crate::core::handlers::background_effect::blur_requested(root) {
+        return None;
+    }
+    let region = with_states(root, |states| {
+        return states
+            .cached_state
+            .get::<BackgroundEffectSurfaceCachedState>()
+            .current()
+            .blur_region
+            .clone();
+    });
+    let Some(region) = region else {
+        return Some(Vec::new());
+    };
+
+    // The protocol region is an ordered add/subtract list, so a client can cut a
+    // hole out of its backdrop.
+    let mut added: Vec<Rectangle<i32, Logical>> = Vec::new();
+    let mut cut: Vec<Rectangle<i32, Logical>> = Vec::new();
+    for (kind, rect) in region.rects {
+        match kind {
+            RectangleKind::Add => added.push(rect),
+            RectangleKind::Subtract => cut.push(rect),
+        }
+    }
+    if !cut.is_empty() {
+        added = Rectangle::subtract_rects_many_in_place(added, cut);
+    }
+
+    let mut out = Vec::with_capacity(added.len());
+    for rect in added {
+        out.push(place_client_rect(rect, local_rect, geometry, rescale));
+    }
+    return Some(out);
+}
+
+/// Map one surface-local logical rectangle into output-local logical space.
+fn place_client_rect(
+    rect: Rectangle<i32, Logical>,
+    local_rect: Rectangle<i32, Logical>,
+    geometry: Rectangle<i32, Logical>,
+    rescale: Scale<f64>,
+) -> Rectangle<i32, Logical> {
+    let loc = Point::from((
+        (f64::from(rect.loc.x - geometry.loc.x) * rescale.x).round() as i32,
+        (f64::from(rect.loc.y - geometry.loc.y) * rescale.y).round() as i32,
+    ));
+    let size = Size::from((
+        (f64::from(rect.size.w) * rescale.x).round() as i32,
+        (f64::from(rect.size.h) * rescale.y).round() as i32,
+    ));
+    return Rectangle::new(local_rect.loc + loc, size);
+}
+
 /// Pointer position in window coordinates, or a negative point when the
 /// pointer is outside the window (`u_cursor`).
 fn window_cursor(core: &Core, rect: Rectangle<i32, Logical>) -> [f32; 2] {
@@ -1062,12 +1198,15 @@ fn window_cursor(core: &Core, rect: Rectangle<i32, Logical>) -> [f32; 2] {
 /// Add the topmost-to-bottommost surfaces of `layers` at their configured
 /// geometry. `layer_geometry` is output-local, which is also the coordinate
 /// space of the render list.
+#[allow(clippy::too_many_arguments)]
 fn push_layers<R>(
     elements: &mut Vec<OutputElements<R>>,
+    core: &Core,
     renderer: &mut R,
     output: &Output,
     layers: &[Layer],
     scale: f64,
+    time: f32,
 ) where
     R: PolyRenderer,
     R::TextureId: Clone + Send + 'static,
@@ -1105,8 +1244,125 @@ fn push_layers<R>(
                 Kind::Unspecified,
             );
             elements.extend(rendered.into_iter().map(OutputElements::Surface));
+            // The backdrop of a bar, panel or dock goes below everything of
+            // this surface, popups included, so it only captures what is
+            // behind the layer.
+            if let Some(blur) = layer_blur(core, surface.wl_surface(), geometry, scale, time) {
+                elements.push(OutputElements::Blur(blur));
+            }
         }
     }
+}
+
+/// The backdrop a layer surface asked for, if any.
+///
+/// Layer surfaces get no configured whole-surface blur the way windows do —
+/// `general.blur.enable` only unlocks the feature. A layer surface is blurred
+/// exactly over the regions it commits through `ext-background-effect-v1`, so a
+/// wallpaper or a bar that never calls `set_blur_region` stays sharp instead of
+/// blurring a full-width strip of the output.
+///
+/// The element id comes from the surface, so the damage tracker keeps the
+/// offscreen backdrop across frames, and the commit counter of the surface
+/// drives repaints: a bar that repaints its own blur region does not reallocate
+/// the blur textures every frame.
+fn layer_blur(
+    core: &Core,
+    surface: &WlSurface,
+    rect: Rectangle<i32, Logical>,
+    scale: f64,
+    time: f32,
+) -> Option<BlurElement> {
+    let config = &core.config.general.blur;
+    if !config.enable || !config.layer_surfaces || !config.accept_client_regions {
+        return None;
+    }
+    if rect.size.w <= 0 || rect.size.h <= 0 {
+        return None;
+    }
+    let program = core.shaders.blur()?;
+    let regions = layer_blur_regions(surface, rect)?;
+    let commit = with_renderer_surface_state(surface, |state| {
+        return state.current_commit();
+    })
+    .unwrap_or_default();
+    let passes = config.passes.clamp(1, 16);
+    return Some(BlurElement::new(
+        // The surface's own render element already owns the plain wayland id.
+        // A blur element is a framebuffer effect, and two elements sharing one
+        // id inside a single damage-tracker pass are treated as the same
+        // element — the backdrop then never reaches the framebuffer. The
+        // namespace keeps the id stable per surface while distinguishing it
+        // from the surface's own element.
+        Id::from_wayland_resource(surface).namespaced(BLUR_ID_NAMESPACE),
+        commit,
+        program.clone(),
+        rect.to_f64(),
+        Some(Rc::from(regions)),
+        CornerRadius::default(),
+        scale,
+        BlurOptions {
+            passes,
+            offset: config.offset,
+        },
+        config.noise.clamp(0.0, 1.0) as f32,
+        1.0,
+        program.uses_time(),
+        time,
+    ));
+}
+
+/// Namespace that separates a layer surface's blur backdrop from the render
+/// element of the surface itself, which share one wayland resource id.
+const BLUR_ID_NAMESPACE: usize = 0x626c_7572; // "blur"
+
+/// Element-local rectangles a layer surface asked to blur.
+///
+/// `None` when the client never set a region, or when what it set covers
+/// nothing on screen: unlike a window, a layer surface never falls back to a
+/// whole-surface backdrop, because there is no configured one.
+///
+/// Layer-shell surfaces have no client-side shadow trick that would shift
+/// their content, so the region is used in surface coordinates with the layer
+/// rectangle as origin. A client that does call `set_window_geometry` would
+/// only shift the backdrop by the same few pixels its own content moves.
+fn layer_blur_regions(
+    surface: &WlSurface,
+    rect: Rectangle<i32, Logical>,
+) -> Option<Vec<Rectangle<i32, Logical>>> {
+    let region = with_states(surface, |states| {
+        return states
+            .cached_state
+            .get::<BackgroundEffectSurfaceCachedState>()
+            .current()
+            .blur_region
+            .clone();
+    })?;
+
+    // The protocol region is an ordered add/subtract list, so a client can cut
+    // holes into its backdrop.
+    let mut added: Vec<Rectangle<i32, Logical>> = Vec::new();
+    let mut cut: Vec<Rectangle<i32, Logical>> = Vec::new();
+    for (kind, region) in region.rects {
+        match kind {
+            RectangleKind::Add => added.push(region),
+            RectangleKind::Subtract => cut.push(region),
+        }
+    }
+    if !cut.is_empty() {
+        added = Rectangle::subtract_rects_many_in_place(added, cut);
+    }
+
+    let mut placed = Vec::with_capacity(added.len());
+    for region in added {
+        let rect_on_output = Rectangle::new(rect.loc + region.loc, region.size);
+        let Some(inside) = rect_on_output.intersection(rect) else {
+            continue;
+        };
+        placed.push(Rectangle::new(inside.loc - rect.loc, inside.size));
+    }
+    let disjoint = decorations::disjoint_pieces(placed);
+    return (!disjoint.is_empty()).then_some(disjoint);
 }
 
 /// Add the Toast stack of the compositor, centered at the top of the output.
@@ -1507,6 +1763,154 @@ pub fn capture_output(
     return session.capture_frame(renderer, &elements, background, buffer);
 }
 
+/// Render one frame of `output` and copy `src` out of it into a client's shm
+/// buffer.
+///
+/// This is the compositor side of `zwlr_screencopy_frame_v1`: a one-shot frame
+/// object that is filled by a single `copy`, so there is no session and no
+/// damage bookkeeping. The client always gets a complete picture of `src`, which
+/// is what it is entitled to expect when the compositor sends no `damage`
+/// events (`crate::core::capture::ScreencopyTarget`).
+///
+/// `src` is in framebuffer pixels. The protocol hands out the region in output
+/// *logical* coordinates, so the caller scales it (`handlers/screencopy.rs`), and
+/// `buffer` must be exactly `src.size` large.
+pub fn capture_region(
+    core: &mut Core,
+    capture: &mut CaptureState,
+    renderer: &mut GlesRenderer,
+    output: &Output,
+    src: Rectangle<i32, Physical>,
+    draw_cursor: bool,
+    buffer: &WlBuffer,
+) -> anyhow::Result<()> {
+    if src.size.w <= 0 || src.size.h <= 0 {
+        return Err(anyhow::anyhow!(
+            "refusing to capture an empty region of {}",
+            output.name()
+        ));
+    }
+    let Some(mode) = output.current_mode() else {
+        return Err(anyhow::anyhow!(
+            "output {} has no mode to capture",
+            output.name()
+        ));
+    };
+    let scale = output.current_scale().fractional_scale();
+    // The element list needs `&mut Core` and the renderer, so it is built before
+    // the target is borrowed (`handlers/screencopy.rs` destructures `State` for
+    // the same reason).
+    let elements = output_elements(core, renderer, output, draw_cursor);
+    let background = core
+        .output_background(output)
+        .map(|color| return color.to_floats())
+        .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+
+    let target = capture.screencopy_target(
+        renderer,
+        &output.name(),
+        output.downgrade(),
+        mode.size,
+        scale.into(),
+    )?;
+    return target.capture_region(renderer, &elements, background, buffer, src);
+}
+
+/// Render the pointer into the shm buffer of a cursor-capture frame.
+///
+/// The client composites the sprite itself, at the position and hotspot its
+/// cursor session was told about, so nothing but the pointer is drawn here and
+/// the rest of the buffer stays transparent — which is why this is the one
+/// capture that uses `Argb8888` instead of `Xrgb8888`.
+pub fn capture_cursor(
+    core: &mut Core,
+    renderer: &mut GlesRenderer,
+    output: &Output,
+    buffer: &WlBuffer,
+) -> anyhow::Result<()> {
+    let scale = output.current_scale();
+    let integer = scale.integer_scale();
+    let Some(size) = cursor_capture_size(core, integer) else {
+        return Err(anyhow::anyhow!("there is no cursor to capture"));
+    };
+
+    // The cursor element is shared with the on-screen rendering, so it is set
+    // up exactly like `push_cursor` does before the elements are built.
+    if matches!(core.cursor_status, CursorImageStatus::Named(_)) {
+        let image = core
+            .cursor
+            .get_image(integer.max(1) as u32, core.start_time.elapsed());
+        core.cursor_element
+            .set_buffer(buffer_from_image(&image, integer.max(1)));
+    }
+    core.cursor_element
+        .set_status(core.cursor_status.clone());
+    let scale = Scale::from(scale.fractional_scale());
+    let elements = core
+        .cursor_element
+        .elements(renderer, Point::from((0, 0)), scale);
+
+    let buffer_size: Size<i32, Buffer> = Size::from((size.w, size.h));
+    let mut texture: GlesTexture = renderer.create_buffer(Fourcc::Argb8888, buffer_size)?;
+    let mut tracker = OutputDamageTracker::new(size, scale, Transform::Normal);
+    let mut target = renderer.bind(&mut texture)?;
+    // A transparent clear: the client is compositing, not covering.
+    tracker.render_output(renderer, &mut target, 0, &elements, [0.0, 0.0, 0.0, 0.0])?;
+    crate::core::capture::copy_cursor_into_shm(buffer, buffer_size, renderer, &target)?;
+    return Ok(());
+}
+
+/// The buffer size of the pointer image, in output pixels.
+///
+/// This is what a cursor capture session has to allocate, and it changes when
+/// the client changes its cursor surface or the theme animates into a frame of
+/// another size — which is why the constraints are re-sent from
+/// `refresh_cursor_sessions`.
+pub fn cursor_capture_size(core: &Core, integer: i32) -> Option<Size<i32, Physical>> {
+    return match &core.cursor_status {
+        CursorImageStatus::Hidden => None,
+        CursorImageStatus::Named(_) => {
+            let image = core
+                .cursor
+                .get_image(integer.max(1) as u32, core.start_time.elapsed());
+            let size = Size::<i32, Physical>::from((image.width as i32, image.height as i32));
+            (size.w > 0 && size.h > 0).then_some(size)
+        }
+        CursorImageStatus::Surface(surface) => {
+            // `buffer_size` is the surface size in surface-logical pixels; a
+            // cursor buffer is never scaled by its client (the compositor picks
+            // the scale from the theme), so it is the pixel size here.
+            let size = with_renderer_surface_state(surface, |state| return state.buffer_size())??;
+            let size = Size::<i32, Physical>::from((size.w, size.h));
+            (size.w > 0 && size.h > 0).then_some(size)
+        }
+    };
+}
+
+/// Where the hotspot sits inside the pointer image, in buffer pixels.
+///
+/// The protocol reports it relative to the captured cursor buffer, while a
+/// client-provided cursor keeps its hotspot in surface-logical coordinates, so
+/// the scale has to be applied here.
+pub fn cursor_capture_hotspot(core: &Core, integer: i32) -> Point<i32, Buffer> {
+    return match &core.cursor_status {
+        CursorImageStatus::Named(_) => {
+            let image = core
+                .cursor
+                .get_image(integer.max(1) as u32, core.start_time.elapsed());
+            Point::from((image.xhot as i32, image.yhot as i32))
+        }
+        CursorImageStatus::Hidden => Point::from((0, 0)),
+        CursorImageStatus::Surface(_) => {
+            let hotspot = cursor_hotspot(&core.cursor_status)
+                .to_f64()
+                .to_physical(Scale::from(f64::from(integer.max(1))))
+                .to_i32_round();
+            Point::from((hotspot.x, hotspot.y))
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1514,6 +1918,31 @@ mod tests {
 
     fn rect(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Logical> {
         return Rectangle::new(Point::from((x, y)), Size::from((w, h)));
+    }
+
+    #[test]
+    fn client_blur_rect_maps_surface_space_to_output_space() {
+        // The surface origin sits at the window rect origin minus the surface
+        // geometry offset: a client region starting at (0, 0) is not the
+        // window's top-left when the window has client-side decoration.
+        let window = rect(100, 50, 400, 300);
+        let geometry = rect(10, 20, 380, 280);
+        assert_eq!(
+            place_client_rect(rect(0, 0, 100, 100), window, geometry, Scale::from(1.0)),
+            rect(90, 30, 100, 100)
+        );
+    }
+
+    #[test]
+    fn client_blur_rect_follows_the_opening_animation() {
+        // The animation shrinks the surface around the window origin, so the
+        // region shrinks and moves with it.
+        let window = rect(100, 50, 200, 150);
+        let geometry = rect(10, 20, 380, 280);
+        assert_eq!(
+            place_client_rect(rect(0, 0, 100, 100), window, geometry, Scale::from(0.5)),
+            rect(95, 40, 50, 50)
+        );
     }
 
     #[test]

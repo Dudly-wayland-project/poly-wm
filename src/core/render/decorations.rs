@@ -15,12 +15,13 @@
 //! [`Decorations::begin_frame`].
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use smithay::backend::renderer::element::Id;
 use smithay::backend::renderer::gles::Uniform;
 use smithay::backend::renderer::gles::element::PixelShaderElement;
 use smithay::backend::renderer::utils::CommitCounter;
-use smithay::utils::{Logical, Rectangle};
+use smithay::utils::{Logical, Point, Rectangle, Size};
 use tracing::warn;
 
 use super::blur::{BlurElement, BlurOptions, BlurProgram};
@@ -52,6 +53,14 @@ pub struct DecorationInputs<'a> {
     /// Clip the decorations to this rectangle (output-local logical), so a
     /// window's shadow cannot paint over a neighbouring overview card.
     pub clip: Option<Rectangle<i32, Logical>>,
+    /// Blur region the client asked for (`ext-background-effect-v1`), in
+    /// output-local logical coordinates.
+    ///
+    /// `None` means the client never set a region, so the configured
+    /// whole-window backdrop is drawn. `Some` means it did — including the
+    /// empty slice a client uses to switch the blur off, which must not be
+    /// confused with "no opinion".
+    pub blur_region: Option<&'a [Rectangle<i32, Logical>]>,
 }
 
 /// Normalize `clip` (output-local logical) into the window's geometry space,
@@ -69,6 +78,106 @@ fn card_clip(rect: Rectangle<i32, Logical>, clip: Option<Rectangle<i32, Logical>
         (clip.loc.x + clip.size.w - rect.loc.x) as f32 / rect.size.w as f32,
         (clip.loc.y + clip.size.h - rect.loc.y) as f32 / rect.size.h as f32,
     ];
+}
+
+/// Past this many rectangles a client blur region is drawn as its bounding box.
+///
+/// Every rectangle becomes a draw instance in the blur element, and normalising
+/// overlapping rectangles into disjoint ones can split them further. A region a
+/// client fragmented into hundreds of pieces is not worth that.
+const MAX_CLIENT_BLUR_REGIONS: usize = 16;
+
+/// What a window's backdrop has to cover.
+///
+/// The three cases are distinct on purpose: a client that never touched
+/// `ext-background-effect-v1` keeps the configured whole-window blur, while one
+/// that committed an empty region asked for *no* blur — a panel that hides its
+/// blur by clearing the region, not by destroying the object.
+#[derive(Debug, Clone, PartialEq)]
+enum BlurArea {
+    /// No client region: the configured whole-window backdrop.
+    Whole,
+    /// The client asked for nothing visible.
+    Nothing,
+    /// Disjoint element-local rectangles.
+    Regions(Rc<[Rectangle<i32, Logical>]>),
+}
+
+/// Turn the client's blur region into element-local rectangles.
+///
+/// The region arrives in output-local logical coordinates (the renderer mapped
+/// it out of surface space), so it is clipped to the drawn window and shifted
+/// by the window origin.
+///
+/// The result is disjoint: the blur element draws one instance per damage
+/// rectangle, so two overlapping rectangles would composite the backdrop twice
+/// and darken the overlap wherever the window is translucent.
+fn client_regions(inputs: &DecorationInputs<'_>) -> BlurArea {
+    let Some(blur_region) = inputs.blur_region else {
+        return BlurArea::Whole;
+    };
+    if blur_region.is_empty() || inputs.rect.size.w <= 0 || inputs.rect.size.h <= 0 {
+        return BlurArea::Nothing;
+    }
+    let window = inputs.rect;
+    let mut clipped: Vec<Rectangle<i32, Logical>> = Vec::with_capacity(blur_region.len());
+    for region in blur_region {
+        let Some(inside) = region.intersection(window) else {
+            continue;
+        };
+        clipped.push(Rectangle::new(inside.loc - window.loc, inside.size));
+    }
+    if clipped.is_empty() {
+        return BlurArea::Nothing;
+    }
+    if clipped.len() > MAX_CLIENT_BLUR_REGIONS {
+        clipped = bounding_box(&clipped).into_iter().collect();
+    }
+
+    let disjoint = disjoint_pieces(clipped);
+    if disjoint.is_empty() {
+        return BlurArea::Nothing;
+    }
+    return BlurArea::Regions(Rc::from(disjoint));
+}
+
+/// Express a list of rectangles as disjoint pieces.
+///
+/// The blur element draws one instance per damage rectangle, so two
+/// overlapping rectangles would composite the backdrop twice and darken the
+/// overlap wherever the surface is translucent. Past
+/// [`MAX_CLIENT_BLUR_REGIONS`] pieces the union is drawn as its bounding box.
+pub fn disjoint_pieces(rects: Vec<Rectangle<i32, Logical>>) -> Vec<Rectangle<i32, Logical>> {
+    // Peel every rectangle against the ones already accepted, so the union is
+    // expressed as disjoint pieces.
+    let mut disjoint: Vec<Rectangle<i32, Logical>> = Vec::with_capacity(rects.len());
+    for rect in rects {
+        let pieces = Rectangle::subtract_rects_many_in_place(vec![rect], disjoint.iter().copied());
+        disjoint.extend(pieces);
+    }
+    if disjoint.len() > MAX_CLIENT_BLUR_REGIONS {
+        return bounding_box(&disjoint).into_iter().collect();
+    }
+    return disjoint;
+}
+
+/// The smallest rectangle containing all of `rects`.
+fn bounding_box(rects: &[Rectangle<i32, Logical>]) -> Option<Rectangle<i32, Logical>> {
+    let first = *rects.first()?;
+    let mut min_x = first.loc.x;
+    let mut min_y = first.loc.y;
+    let mut max_x = first.loc.x + first.size.w;
+    let mut max_y = first.loc.y + first.size.h;
+    for rect in &rects[1..] {
+        min_x = min_x.min(rect.loc.x);
+        min_y = min_y.min(rect.loc.y);
+        max_x = max_x.max(rect.loc.x + rect.size.w);
+        max_y = max_y.max(rect.loc.y + rect.size.h);
+    }
+    return Some(Rectangle::new(
+        Point::from((min_x, min_y)),
+        Size::from((max_x - min_x, max_y - min_y)),
+    ));
 }
 
 /// The decorations of one window, front to back relative to each other.
@@ -114,13 +223,17 @@ struct ShadowKey {
 /// Blur parameters, used to detect changes. The program identity is compared
 /// separately, because a reload can keep every parameter and still need a new
 /// element.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct BlurKey {
     passes: u32,
     offset_bits: u64,
     noise: f32,
     radius: [f32; 4],
     alpha: f32,
+    /// Element-local rectangles, or `None` for the whole window. Compared by
+    /// content, so a region that did not change keeps the same commit counter
+    /// and does not damage the window.
+    regions: Option<Rc<[Rectangle<i32, Logical>]>>,
 }
 
 struct WindowDecor {
@@ -380,12 +493,25 @@ impl Decorations {
             return None;
         }
 
+        let regions = match client_regions(inputs) {
+            BlurArea::Nothing => {
+                // The client switched the backdrop off. Drop the cached element
+                // so a later region starts from a fresh id instead of resuming
+                // a commit counter the damage tracker last saw at zero area.
+                entry.blur = None;
+                return None;
+            }
+            BlurArea::Whole => None,
+            BlurArea::Regions(regions) => Some(regions),
+        };
+
         let key = BlurKey {
             passes: params.passes,
             offset_bits: params.offset.to_bits(),
             noise: params.noise,
             radius: <[f32; 4]>::from(radius),
             alpha: inputs.alpha,
+            regions,
         };
         let unchanged = match &entry.blur {
             Some((cached, cached_program, _, _)) => {
@@ -409,12 +535,13 @@ impl Decorations {
             entry.blur = Some((key, program.clone(), id, commit));
         }
 
-        let (_, _, id, commit) = entry.blur.as_ref()?;
+        let (cached, _, id, commit) = entry.blur.as_ref()?;
         return Some(BlurElement::new(
             id.clone(),
             *commit,
             program.clone(),
             inputs.rect.to_f64(),
+            cached.regions.clone(),
             radius,
             inputs.scale,
             BlurOptions {
@@ -457,5 +584,112 @@ mod tests {
             Rectangle::new((8, 18).into(), (104, 54).into())
         );
         assert_eq!(border_geometry(rect, 0.0), rect);
+    }
+
+    fn inputs<'a>(
+        rect: Rectangle<i32, Logical>,
+        visuals: &'a WindowVisuals,
+        blur_region: Option<&'a [Rectangle<i32, Logical>]>,
+    ) -> DecorationInputs<'a> {
+        return DecorationInputs {
+            id: 1,
+            rect,
+            alpha: 1.0,
+            focused: false,
+            visuals,
+            fullscreen: false,
+            scale: 1.0,
+            time: 0.0,
+            cursor: [-1.0, -1.0],
+            clip: None,
+            blur_region,
+        };
+    }
+
+    #[test]
+    fn client_regions_are_clipped_to_the_window_and_made_element_local() {
+        let visuals = WindowVisuals::default();
+        let region = [Rectangle::new((90, 30).into(), (100, 100).into())];
+        let inputs = inputs(
+            Rectangle::new((100, 50).into(), (400, 300).into()),
+            &visuals,
+            Some(&region),
+        );
+
+        let regions = match client_regions(&inputs) {
+            BlurArea::Regions(regions) => regions,
+            other => panic!("the region lies inside the window, got {other:?}"),
+        };
+        assert_eq!(&*regions, &[Rectangle::new((0, 0).into(), (90, 80).into())]);
+    }
+
+    #[test]
+    fn no_client_region_means_the_whole_window() {
+        let visuals = WindowVisuals::default();
+        let inputs = inputs(
+            Rectangle::new((100, 50).into(), (400, 300).into()),
+            &visuals,
+            None,
+        );
+        assert_eq!(client_regions(&inputs), BlurArea::Whole);
+    }
+
+    #[test]
+    fn an_empty_client_region_means_no_blur_at_all() {
+        let visuals = WindowVisuals::default();
+        let inputs = inputs(
+            Rectangle::new((100, 50).into(), (400, 300).into()),
+            &visuals,
+            Some(&[]),
+        );
+        assert_eq!(client_regions(&inputs), BlurArea::Nothing);
+    }
+
+    #[test]
+    fn a_client_region_outside_the_window_blurs_nothing() {
+        let visuals = WindowVisuals::default();
+        // Entirely to the right of the window: the client asked for a backdrop
+        // it does not cover, which must not fall back to the whole window.
+        let region = [Rectangle::new((600, 50).into(), (100, 100).into())];
+        let inputs = inputs(
+            Rectangle::new((100, 50).into(), (400, 300).into()),
+            &visuals,
+            Some(&region),
+        );
+        assert_eq!(client_regions(&inputs), BlurArea::Nothing);
+    }
+
+    fn area(rects: &[Rectangle<i32, Logical>]) -> i64 {
+        return rects
+            .iter()
+            .map(|rect| return i64::from(rect.size.w) * i64::from(rect.size.h))
+            .sum();
+    }
+
+    #[test]
+    fn overlapping_client_regions_are_split_so_nothing_is_painted_twice() {
+        let visuals = WindowVisuals::default();
+        // Two 100x100 squares overlapping in a 50x50 corner.
+        let region = [
+            Rectangle::new((100, 50).into(), (100, 100).into()),
+            Rectangle::new((150, 100).into(), (100, 100).into()),
+        ];
+        let inputs = inputs(
+            Rectangle::new((100, 50).into(), (400, 300).into()),
+            &visuals,
+            Some(&region),
+        );
+
+        let regions = match client_regions(&inputs) {
+            BlurArea::Regions(regions) => regions,
+            other => panic!("the union is not empty, got {other:?}"),
+        };
+        // Counting the union once is exactly what keeping the pieces disjoint
+        // means: 100*100 + 100*100 - 50*50.
+        assert_eq!(area(&regions), 17_500);
+        assert!(
+            regions.len() > 1,
+            "the overlap has to be split off, got {regions:?}"
+        );
     }
 }

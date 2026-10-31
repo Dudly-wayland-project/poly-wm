@@ -900,7 +900,15 @@ fn parse_blur(table: &Table, root: &Path, errors: &mut Errors) -> Blur {
     lx::warn_unknown(
         table,
         "general.blur",
-        &["enable", "passes", "offset", "noise", "shader"],
+        &[
+            "enable",
+            "passes",
+            "offset",
+            "noise",
+            "accept_client_regions",
+            "layer_surfaces",
+            "shader",
+        ],
         errors,
     );
     if let Some(value) = lx::boolean(table, "enable", "general.blur", errors) {
@@ -928,6 +936,12 @@ fn parse_blur(table: &Table, root: &Path, errors: &mut Errors) -> Blur {
                 "value must be between 0.0 and 1.0",
             );
         }
+    }
+    if let Some(value) = lx::boolean(table, "accept_client_regions", "general.blur", errors) {
+        blur.accept_client_regions = value;
+    }
+    if let Some(value) = lx::boolean(table, "layer_surfaces", "general.blur", errors) {
+        blur.layer_surfaces = value;
     }
     if let Some(t) = lx::table(table, "shader", "general.blur", errors) {
         let path = "general.blur.shader";
@@ -2055,6 +2069,7 @@ mod tests {
                     border = { width = 2, radius = 12, active = "#ff0000", inactive = "#11223344" },
                     shadow = { enable = true, blur = 24, offset = { 0, 6 }, color = "#000000a0" },
                     blur = { enable = true, passes = 4, offset = 2.5, noise = 0.1,
+                             accept_client_regions = false,
                              shader = { up = "up.frag", finish = "~/finish.frag" } },
                     opacity = 0.9,
                     window_shader = "glass.frag",
@@ -2080,6 +2095,7 @@ mod tests {
         assert_eq!(blur.passes, 4);
         assert_eq!(blur.offset, 2.5);
         assert_eq!(blur.noise, 0.1);
+        assert!(!blur.accept_client_regions);
         assert!(blur.shader.down.is_none());
         assert!(blur.shader.up.as_deref().unwrap().ends_with("up.frag"));
         assert!(

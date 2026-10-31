@@ -49,6 +49,7 @@ use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{ClockSource, Logical, Monotonic, Point};
 use smithay::wayland::alpha_modifier::AlphaModifierState;
+use smithay::wayland::background_effect::BackgroundEffectState;
 use smithay::wayland::commit_timing::CommitTimingManagerState;
 use smithay::wayland::compositor::CompositorState;
 use smithay::wayland::content_type::ContentTypeState;
@@ -60,7 +61,7 @@ use smithay::wayland::fractional_scale::FractionalScaleManagerState;
 use smithay::wayland::idle_inhibit::IdleInhibitManagerState;
 use smithay::wayland::idle_notify::IdleNotifierState;
 use smithay::wayland::image_capture_source::{ImageCaptureSourceState, OutputCaptureSourceState};
-use smithay::wayland::image_copy_capture::{ImageCopyCaptureState, Session};
+use smithay::wayland::image_copy_capture::{CursorSession, ImageCopyCaptureState, Session};
 use smithay::wayland::input_method::InputMethodManagerState;
 use smithay::wayland::keyboard_shortcuts_inhibit::{
     KeyboardShortcutsInhibitState, KeyboardShortcutsInhibitor,
@@ -211,6 +212,13 @@ pub struct Core {
     /// `wp_alpha_modifier_v1`.
     #[allow(dead_code)]
     pub alpha_modifier_state: AlphaModifierState,
+    /// `ext_background_effect_manager_v1`.
+    ///
+    /// Only the global itself is kept here: a client's blur region lives in the
+    /// double-buffered `BackgroundEffectSurfaceCachedState` on its surface, and
+    /// the renderer reads it from there (`render::push_window`).
+    #[allow(dead_code)]
+    pub background_effect_state: BackgroundEffectState,
     /// `wp_content_type_v1`.
     #[allow(dead_code)]
     pub content_type_state: ContentTypeState,
@@ -300,6 +308,12 @@ pub struct Core {
     /// handed to us in `new_session` is kept here until `session_destroyed`
     /// removes it.
     pub image_copy_sessions: Vec<Session>,
+    /// Live pointer-cursor capture sessions
+    /// (`ext_image_copy_capture_manager_v1.create_pointer_cursor_session`).
+    ///
+    /// Same ownership rule as the sessions above: dropping the value stops the
+    /// session, so it lives here until the client destroys the object.
+    pub cursor_sessions: Vec<CursorSession>,
 
     /// Surfaces holding a keyboard-shortcuts inhibitor: while one of them has
     /// focus, bindings are not dispatched (`zwp_keyboard_shortcuts_inhibit_v1`).
@@ -497,6 +511,10 @@ impl Core {
         let single_pixel_buffer_state = SinglePixelBufferState::new::<State>(&display_handle);
         let fractional_scale_state = FractionalScaleManagerState::new::<State>(&display_handle);
         let alpha_modifier_state = AlphaModifierState::new::<State>(&display_handle);
+        // Clients blur their own background through this (`foot`, `kitty`).
+        // The protocol layer lives in Smithay; what the region means for
+        // rendering is ours (`handlers/background_effect.rs`).
+        let background_effect_state = BackgroundEffectState::new::<State>(&display_handle);
         let content_type_state = ContentTypeState::new::<State>(&display_handle);
         let fifo_state = FifoManagerState::new::<State>(&display_handle);
         let commit_timing_state = CommitTimingManagerState::new::<State>(&display_handle);
@@ -549,6 +567,10 @@ impl Core {
         let image_capture_source_state = ImageCaptureSourceState::new();
         let output_capture_source_state = OutputCaptureSourceState::new::<State>(&display_handle);
         let image_copy_capture_state = ImageCopyCaptureState::new::<State>(&display_handle);
+        // `zwlr_screencopy_manager_v1` is not part of Smithay's protocol set, so
+        // its global is created by hand; it shares the rendering path with the
+        // `ext` pair above (`handlers/screencopy.rs`).
+        crate::core::handlers::screencopy::create_global(&display_handle);
 
         let mut seat_state = SeatState::new();
         // `new_wl_seat` also announces the `wl_seat` global; `new_seat` would
@@ -640,6 +662,7 @@ impl Core {
             single_pixel_buffer_state,
             fractional_scale_state,
             alpha_modifier_state,
+            background_effect_state,
             content_type_state,
             fifo_state,
             commit_timing_state,
@@ -668,6 +691,7 @@ impl Core {
             output_capture_source_state,
             image_copy_capture_state,
             image_copy_sessions: Vec::new(),
+            cursor_sessions: Vec::new(),
             keyboard_shortcuts_inhibitors: HashMap::new(),
             idle_inhibiting_surfaces: HashSet::new(),
             unmapped_layer_surfaces: HashSet::new(),

@@ -272,6 +272,20 @@ pub struct Blur {
     pub offset: f64,
     /// Amount of noise added to the blur, `0.0 ..= 1.0`. Hides banding.
     pub noise: f64,
+    /// Honour `ext-background-effect-v1` regions requested by clients.
+    ///
+    /// When a client asks for a blurred region, that region replaces the
+    /// whole-window backdrop `enable` would otherwise draw. Turning this off
+    /// ignores every client request and keeps the compositor in charge of what
+    /// gets blurred.
+    pub accept_client_regions: bool,
+    /// Blur the backdrop of layer surfaces (bars, panels, docks) that ask for
+    /// one with `ext-background-effect-v1`.
+    ///
+    /// Layer surfaces never get a whole-surface backdrop the way windows do:
+    /// only the regions a client requests are blurred, so a bar that does not
+    /// ask stays sharp. `enable` is still the master switch.
+    pub layer_surfaces: bool,
     /// Custom blur shaders; `None` uses the built-in Kawase ones.
     pub shader: BlurShader,
 }
@@ -283,6 +297,8 @@ impl Default for Blur {
             passes: 3,
             offset: 3.0,
             noise: 0.0,
+            accept_client_regions: true,
+            layer_surfaces: true,
             shader: BlurShader::default(),
         };
     }

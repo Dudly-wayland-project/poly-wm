@@ -187,6 +187,8 @@ blur = {
     passes = 3,
     offset = 3.0,
     noise = 0.0,
+    accept_client_regions = true,
+    layer_surfaces = true,
     shader = {
         down = "shaders/blur_down.frag",
         up = "shaders/blur_up.frag",
@@ -201,7 +203,35 @@ blur = {
 | `passes` | `3` | Number of Kawase down/up passes. Range: 0-8. |
 | `offset` | `3.0` | Sampling offset in pixels. Range: 0-64. |
 | `noise` | `0.0` | Dithering noise that hides banding. Range: 0.0-1.0. |
+| `accept_client_regions` | `true` | Honour the blur regions clients request through `ext-background-effect-v1`. |
+| `layer_surfaces` | `true` | Blur the backdrop of bars, panels and docks that request it. |
 | `shader` | built in | Optional replacement shader files. Paths resolve against the root `config.lua`. |
+
+`enable` is the master switch: a client cannot blur anything by itself. With it
+on, `accept_client_regions` decides what happens when a client announces a blur
+region on one of its surfaces (foot, kitty and other terminals do this to blur
+their own background). With it on, that region replaces the whole-window
+backdrop: only the part of the window the client asked for is blurred, and the
+client can leave the rest opaque. With it off, the request is ignored and the
+whole window is blurred, which keeps the compositor in charge of the look.
+
+Either way the blur uses the parameters above and is clipped to the window and
+its rounded corners. The region is only read from the window's own surface; a
+client that sets one on a subsurface gets the whole-window backdrop instead.
+
+A client that empties its region gets no backdrop at all. That is how a client
+switches the blur off without destroying its background-effect object, and both
+wire forms count: a null region (`set_blur_region(NULL)`, what Noctalia and most
+toolkits send) and a committed region with no rectangles. The difference between
+"never asked" (the configured whole-window blur) and "asked for nothing" (no
+blur) matters, and panels rely on it.
+
+Layer surfaces (the bar, panels, the dock, notification daemons) are handled
+separately because there is no window rule to give them a look. They are only
+blurred where the client asked: `layer_surfaces` enables the feature, but a
+surface that never calls `set_blur_region` stays sharp, so a wallpaper client
+cannot end up with a blurred screen. `enable` still has to be on, and
+`accept_client_regions` still applies.
 
 Shader keys are `down` (downsample), `up` (upsample) and `finish` (final pass).
 A shader that fails to compile keeps the previous program and reports the error

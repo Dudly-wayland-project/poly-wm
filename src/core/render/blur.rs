@@ -24,7 +24,7 @@ use smithay::backend::renderer::{
     ContextId, Frame as _, FrameContext as _, Offscreen, Renderer as _, Texture as _,
 };
 use smithay::utils::user_data::UserDataMap;
-use smithay::utils::{Buffer, Logical, Physical, Rectangle, Scale, Size, Transform};
+use smithay::utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Size, Transform};
 use tracing::warn;
 
 use super::shaders::mat3_uniform;
@@ -179,6 +179,10 @@ pub struct BlurElement {
     program: BlurProgram,
     /// Window geometry in output-local logical coordinates.
     geometry: Rectangle<f64, Logical>,
+    /// Element-local logical rectangles to paint, when a client asked for a
+    /// partial backdrop (`ext-background-effect-v1`). `None` paints the whole
+    /// element, which is the configured window blur.
+    regions: Option<Rc<[Rectangle<i32, Logical>]>>,
     corner_radius: CornerRadius,
     scale: f64,
     options: BlurOptions,
@@ -195,18 +199,26 @@ impl std::fmt::Debug for BlurElement {
             .debug_struct("BlurElement")
             .field("id", &self.id)
             .field("geometry", &self.geometry)
+            .field("regions", &self.regions.as_ref().map(|r| return r.len()))
             .finish();
     }
 }
 
 impl BlurElement {
     /// Build a blur element for a window.
+    ///
+    /// `regions` are element-local logical rectangles, relative to `geometry`.
+    /// `None` blurs `geometry` as a whole; `Some` blurs only those parts, which
+    /// is what a client asked for through `ext-background-effect-v1`. An empty
+    /// slice is treated as `None`, so a client that committed an empty region
+    /// cannot turn the backdrop into nothing by accident.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: Id,
         commit: CommitCounter,
         program: BlurProgram,
         geometry: Rectangle<f64, Logical>,
+        regions: Option<Rc<[Rectangle<i32, Logical>]>>,
         corner_radius: CornerRadius,
         scale: f64,
         options: BlurOptions,
@@ -220,6 +232,7 @@ impl BlurElement {
             commit,
             program,
             geometry,
+            regions: regions.filter(|regions| return !regions.is_empty()),
             corner_radius,
             scale,
             options,
@@ -374,6 +387,46 @@ impl BlurElement {
         return Ok(());
     }
 
+    /// Intersect the frame's element-local damage with the client's blur region.
+    ///
+    /// Damage arrives in physical pixels while the region is expressed in
+    /// logical surface pixels, so it is scaled by the factor the element is
+    /// currently drawn at: both the output scale and the opening animation are
+    /// folded into `dst`.
+    fn clip_to_regions(
+        &self,
+        damage: &[Rectangle<i32, Physical>],
+        dst: Rectangle<i32, Physical>,
+    ) -> Vec<Rectangle<i32, Physical>> {
+        let Some(regions) = &self.regions else {
+            return damage.to_vec();
+        };
+        if self.geometry.size.w <= 0.0 || self.geometry.size.h <= 0.0 {
+            return Vec::new();
+        }
+        let sx = f64::from(dst.size.w) / self.geometry.size.w.max(1.0);
+        let sy = f64::from(dst.size.h) / self.geometry.size.h.max(1.0);
+        let mut clipped = Vec::with_capacity(damage.len());
+        for region in regions.iter() {
+            let physical = Rectangle::new(
+                Point::from((
+                    (f64::from(region.loc.x) * sx).round() as i32,
+                    (f64::from(region.loc.y) * sy).round() as i32,
+                )),
+                Size::from((
+                    (f64::from(region.size.w) * sx).round() as i32,
+                    (f64::from(region.size.h) * sy).round() as i32,
+                )),
+            );
+            clipped.extend(
+                damage
+                    .iter()
+                    .filter_map(|rect| return rect.intersection(physical)),
+            );
+        }
+        return clipped;
+    }
+
     fn draw(
         &self,
         frame: &mut GlesFrame<'_, '_>,
@@ -401,6 +454,11 @@ impl BlurElement {
         // element in local coordinates, not against `clamped_dst` whose
         // location is in output coordinates.
         let local_area = Rectangle::new(clamped_dst.loc - dst.loc, clamped_dst.size);
+        // A client blur region narrows what is painted: `render_texture_from_to`
+        // draws one instance per damage rectangle, so intersecting the damage
+        // with the region is enough to leave the rest of the window untouched —
+        // no scissor state and no second shader path.
+        let damage = self.clip_to_regions(damage, dst);
         let damage: Vec<_> = damage
             .iter()
             .filter_map(|rect| return rect.intersection(local_area))
