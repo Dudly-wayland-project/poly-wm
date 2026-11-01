@@ -1,4 +1,4 @@
-//! The Lua layout bridge (`docs/plan.md` §9.2).
+//! The Lua layout bridge.
 //!
 //! The configuration loader keeps the `Lua` state alive after parsing when the
 //! file defines named layouts. The compositor then calls [`LayoutPrograms::arrange`]
@@ -25,7 +25,7 @@ use crate::config::{
 use crate::error::{Errors, path_key};
 use crate::lua_ext as lx;
 
-/// Instructions one `arrange` call may execute (`docs/plan.md` §9.2).
+/// Instructions one `arrange` call may execute.
 const ARRANGE_BUDGET: u64 = 200_000;
 
 /// How often the arrange hook checks the budget.

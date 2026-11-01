@@ -2,8 +2,8 @@
 
 //! Seat, clipboard and pointer-constraint handlers.
 //!
-//! The clipboard and drag-and-drop handling here is complete; the enrichments
-//! (wlr-data-control, pointer gestures, tablet) arrive in M1/M2.
+//! Clipboard, drag-and-drop, data-control and pointer-constraint handling live
+//! here.
 
 use smithay::input::dnd::{DnDGrab, DndGrabHandler, GrabType, Source};
 use smithay::input::pointer::{CursorImageStatus, Focus, GrabStartData, PointerGrab};
@@ -44,7 +44,7 @@ impl SeatHandler for State {
     ///
     /// Our [`ClickGrab`] keeps the focus where the press started (so a click
     /// that leaves the window still reaches it) and is what `move_request` /
-    /// `resize_request` are validated against (`docs/plan.md` §9.5).
+    /// `resize_request` are validated against.
     fn click_grab(&mut self, start_data: GrabStartData<Self>) -> impl PointerGrab<Self> {
         return ClickGrab::new(start_data);
     }
@@ -116,7 +116,7 @@ impl WaylandDndGrabHandler for State {
                     DnDGrab::new_pointer(&self.core.display_handle, start_data, source, seat);
                 pointer.set_grab(self, grab, serial, Focus::Keep);
             }
-            // Touch drag-and-drop arrives with the touch input model in M1.
+            // Touch drag-and-drop is not implemented yet.
             GrabType::Touch => source.cancel(),
         }
     }

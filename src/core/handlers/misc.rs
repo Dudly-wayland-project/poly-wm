@@ -2,7 +2,7 @@
 //
 //! Handlers for the protocol globals that need little or no Poly-specific
 //! logic: scale metadata, decorations, activation, taskbar toplevels, idle
-//! management, pointer warp and shortcut inhibits (`docs/plan.md` §7).
+//! management, pointer warp and shortcut inhibits.
 
 use smithay::backend::input::{InputTime, TabletToolDescriptor};
 use smithay::input::pointer::MotionEvent;
@@ -50,11 +50,11 @@ impl TabletSeatHandler for State {
     }
 }
 
-/// Poly stores no icon cache yet; taskbars (M5) read icons from
-/// `ext-foreign-toplevel-list` metadata instead.
+/// Poly stores no icon cache yet; taskbars resolve icons themselves.
 impl XdgToplevelIconHandler for State {}
 
-/// Tags are kept client-side; window rules match them from M3 on.
+/// Tags are stored in Smithay's per-surface data; window rules do not match
+/// them.
 impl XdgToplevelTagHandler for State {}
 
 impl XdgForeignHandler for State {
@@ -80,7 +80,7 @@ impl XdgDecorationHandler for State {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
         // Clients only see this global while `prefer_no_csd` is on, in which
         // case Poly decorates: answer `ServerSide` so the client drops its own
-        // decoration (Poly's border, corners and shadow follow in M4). A rule
+        // decoration (Poly draws the border, corners and shadow). A rule
         // with `no_csd = false` instead asks this window to keep its own.
         let mode = if toplevel_no_csd(self, &toplevel) {
             Mode::ServerSide
@@ -178,7 +178,7 @@ impl XdgActivationHandler for State {
         surface: WlSurface,
     ) {
         // Any client holding a token may ask for focus; that is what tokens
-        // are for. M5 will add rate limiting for misbehaving clients.
+        // are for. Rate limiting for misbehaving clients is not implemented yet.
         let root = root_surface(&surface);
         let Some(window) = window_for_root(self, &root) else {
             debug!("activation request for an unknown surface");
@@ -352,7 +352,7 @@ impl State {
 /// The app id and title a client committed for a toplevel.
 ///
 /// A named struct rather than a tuple: window rules match on both, and swapped
-/// fields silently match the wrong thing (`docs/plan.md` §10.2).
+/// fields silently match the wrong thing.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct WindowIdentity {
     /// `xdg_toplevel.set_app_id`.

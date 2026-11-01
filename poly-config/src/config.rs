@@ -1,8 +1,9 @@
 //! The configuration types, filled in from Lua by [`crate::lua`].
 //!
-//! Field names and defaults follow `docs/plan.md` §11; everything the M1
-//! compositor does not use yet is still parsed and stored, so a configuration
-//! file written for a later milestone loads without surprises.
+//! Field names and defaults follow `docs/config.md`; the Lua layer in
+//! [`crate::lua`] and [`crate::layout`] fills this model and validates it. A
+//! configuration written for a newer build still loads after a downgrade, as
+//! unknown settings are warnings rather than errors.
 
 use crate::binds::Keybind;
 
@@ -15,34 +16,33 @@ pub struct Config {
     pub input: Input,
     /// Key bindings, in file order (first match wins).
     pub keybinds: Vec<Keybind>,
-    /// Interactive move/resize behaviour (`docs/plan.md` §9.5).
+    /// Interactive move/resize behaviour.
     pub window_drag: WindowDrag,
     /// Commands to run once the compositor is up.
     pub spawn_at_startup: Vec<StartupSpawn>,
     /// Extra environment variables for spawned children.
     pub environment: Vec<(String, String)>,
     /// Rules for layer surfaces (bars, notifications, launchers), first match
-    /// wins (`docs/plan.md` §11).
+    /// wins.
     pub layer_rules: Vec<LayerRule>,
-    /// Named Lua layouts, in configuration order (`docs/plan.md` §9.2).
+    /// Named Lua layouts, in configuration order.
     pub layouts: Vec<LayoutInfo>,
     /// The layout new outputs start with. Empty means the built-in fallback.
     pub default_layout: Option<String>,
-    /// Rules for toplevel windows, first match wins (`docs/plan.md` §9.1).
+    /// Rules for toplevel windows, first match wins.
     pub window_rules: Vec<WindowRule>,
     /// Per-output overrides, keyed by name or glob (`"eDP-1"`, `"DP-*"`).
     ///
     /// The list is sorted by specificity when it is parsed, so that the first
     /// matching entry is always the most specific one (`docs/config.md`).
     pub outputs: Vec<(String, OutputConfig)>,
-    /// Fullscreen behaviour (`docs/plan.md` §9.4).
+    /// Fullscreen behaviour.
     pub fullscreen: Fullscreen,
-    /// Appearance of the workspace overview (`docs/plan.md` §9.7).
+    /// Appearance of the workspace overview.
     pub overview: Overview,
-    /// Where configuration and runtime problems are reported
-    /// (`docs/plan.md` §14).
+    /// Where configuration and runtime problems are reported.
     pub errors: Errors,
-    /// X11 clients through `xwayland-satellite` (`docs/plan.md` §13).
+    /// X11 clients through `xwayland-satellite`.
     pub xwayland: Xwayland,
 }
 
@@ -167,25 +167,25 @@ pub struct General {
     /// Which modifier `Mod` in a binding refers to. Defaults per backend:
     /// Super on udev/headless, Alt when nested in winit.
     pub mod_key: Option<ModKey>,
-    /// Ask clients to draw no decorations (`prefer no CSD`, `docs/plan.md` §2).
+    /// Ask clients to draw no decorations (`prefer no CSD`, `docs/config.md`).
     pub prefer_no_csd: bool,
     /// Spacing in logical pixels, applied by the compositor: layouts get a
     /// work area inset by this much on every side (`ctx.output.work_area`), and
     /// layouts use `poly.gap` for the spacing between windows. It therefore
     /// affects window width *and* height, and keeps windows clear of layer-shell
-    /// bars (`docs/plan.md` §9.2).
+    /// bars.
     pub gap: i32,
-    /// Geometry and open/close animations (`docs/plan.md` §9).
+    /// Geometry and open/close animations.
     pub animations: Animations,
-    /// Window decorations drawn by the compositor (`docs/plan.md` §10.1).
+    /// Window decorations drawn by the compositor.
     pub border: Border,
-    /// Drop shadow drawn behind windows (`docs/plan.md` §10.1).
+    /// Drop shadow drawn behind windows.
     pub shadow: Shadow,
-    /// Background blur (`docs/plan.md` §10.3).
+    /// Background blur.
     pub blur: Blur,
     /// Default window opacity, `0.0 ..= 1.0`.
     pub opacity: f64,
-    /// A GLSL fragment shader run for every window (`docs/plan.md` §10.4).
+    /// A GLSL fragment shader run for every window.
     /// `None` keeps the built-in shader.
     pub window_shader: Option<String>,
     /// The software cursor the compositor draws.
@@ -263,7 +263,7 @@ impl Cursor {
     }
 }
 
-/// `general.border = { … }` (`docs/plan.md` §10.1).
+/// `general.border = { … }`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Border {
     /// Border thickness in logical pixels. `0` disables the border.
@@ -287,7 +287,7 @@ impl Default for Border {
     }
 }
 
-/// `general.shadow = { … }` (`docs/plan.md` §10.1).
+/// `general.shadow = { … }`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Shadow {
     /// Whether windows get a drop shadow.
@@ -318,7 +318,7 @@ impl Default for Shadow {
     }
 }
 
-/// `general.blur = { … }` (`docs/plan.md` §10.3).
+/// `general.blur = { … }`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Blur {
     /// Whether windows matching the rule blur what is behind them.
@@ -801,7 +801,7 @@ pub enum AccelProfile {
     Flat,
 }
 
-/// `window_drag = { … }` (`docs/plan.md` §9.5).
+/// `window_drag = { … }`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowDrag {
     /// What dragging a tiled window does.
@@ -891,7 +891,7 @@ pub enum StartupSpawn {
     Shell(String),
 }
 
-/// A named Lua layout (`docs/plan.md` §9.2).
+/// A named Lua layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutInfo {
     /// The name used by `default_layout`, `set-layout` and `cycle-layout`.
@@ -907,8 +907,8 @@ pub struct LayoutInfo {
 
 /// `window_rules[i]`: state and appearance applied when a window maps.
 ///
-/// M3 acts on `float`, `focus` and `open_on_output`; the visual fields are
-/// parsed now so that configurations written for M4 keep loading unchanged.
+/// The layout engine acts on `float`, `focus` and `open_on_output`; the visual
+/// fields are resolved per window when it maps.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct WindowRule {
     /// Glob matched against the window's `app_id`.
@@ -921,18 +921,18 @@ pub struct WindowRule {
     pub focus: Option<bool>,
     /// Open on the first output whose name matches this glob.
     pub open_on_output: Option<String>,
-    /// Blur behind the window (M4).
+    /// Blur behind the window.
     pub blur: Option<bool>,
-    /// Corner radius in logical pixels (M4).
+    /// Corner radius in logical pixels.
     pub radius: Option<f64>,
-    /// Draw a shadow (M4).
+    /// Draw a shadow.
     pub shadow: Option<bool>,
-    /// Window opacity, 0.0 ..= 1.0 (M4).
+    /// Window opacity, 0.0 ..= 1.0.
     pub opacity: Option<f64>,
-    /// Ask this window to use client-side decorations (M4).
+    /// Ask this window to use client-side decorations.
     pub no_csd: Option<bool>,
     /// A GLSL window shader for this window, overriding
-    /// `general.window_shader` (M4). Resolved like every other path.
+    /// `general.window_shader`. Resolved like every other path.
     pub window_shader: Option<String>,
 }
 
@@ -1094,7 +1094,7 @@ pub enum LayoutOptionValue {
     String(String),
 }
 
-/// `fullscreen = { … }` (`docs/plan.md` §9.4).
+/// `fullscreen = { … }`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fullscreen {
     /// Whether a compositor-managed fullscreen window covers `Top` layers.
@@ -1109,7 +1109,7 @@ impl Default for Fullscreen {
     }
 }
 
-/// `overview = { … }` (`docs/plan.md` §9.7).
+/// `overview = { … }`.
 ///
 /// The defaults follow niri: cards shrink to half size, sit on an opaque
 /// `#262626` backdrop and cast a soft shadow. `zoom` is clamped to
@@ -1149,7 +1149,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_follow_the_plan() {
+    fn defaults_match_documentation() {
         let config = Config::default();
         assert_eq!(config.general.gap, 8);
         assert!(config.general.prefer_no_csd);
@@ -1177,7 +1177,7 @@ mod tests {
     }
 }
 
-/// `errors = { … }` (`docs/plan.md` §14).
+/// `errors = { … }`.
 ///
 /// The compositor always draws its own Toasts; these settings only add another
 /// channel on top of them.
@@ -1191,8 +1191,7 @@ pub struct Errors {
     pub dbus: bool,
 }
 
-/// `xwayland = { … }`: X11 clients through `xwayland-satellite`
-/// (`docs/plan.md` §13).
+/// `xwayland = { … }`: X11 clients through `xwayland-satellite`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Xwayland {
     /// Set up X11 at all. Off means no X11 sockets and no `DISPLAY` for

@@ -41,7 +41,7 @@ pub enum Request {
     /// Change an output at runtime (scale, mode, position).
     ///
     /// The change is temporary: it is not written back to the configuration
-    /// file, and a later `reload-config` may replace it (`docs/plan.md` §12).
+    /// file, and a later `reload-config` may replace it.
     OutputConfig {
         /// Output name, as reported by [`Request::Outputs`].
         output: String,
@@ -113,7 +113,7 @@ pub enum Response {
     XwaylandStatus(XwaylandStatus),
 }
 
-/// The state of the XWayland integration (`docs/plan.md` §13).
+/// The state of the XWayland integration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct XwaylandStatus {
     /// Whether X11 is set up: the sockets exist and children get `DISPLAY`.
@@ -231,8 +231,7 @@ pub enum FullscreenMode {
 /// One workspace of one output.
 ///
 /// Workspaces have no stable ids: they are identified by the output they live
-/// on plus their 1-based index in that output's vertical stack
-/// (`docs/plan.md` §9.6).
+/// on plus their 1-based index in that output's vertical stack.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Workspace {
     /// 1-based index in the output's stack.

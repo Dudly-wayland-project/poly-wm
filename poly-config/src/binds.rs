@@ -5,7 +5,7 @@
 //! Key bindings: which key (or mouse button, or scroll wheel tick) with which
 //! modifiers triggers an action.
 //!
-//! The spelling follows niri's (`docs/plan.md` §8): `"Mod+Shift+Q"`,
+//! The spelling follows niri's: `"Mod+Shift+Q"`,
 //! `"XF86AudioRaiseVolume"`, `"Mod+MouseLeft"`, `"Mod+WheelScrollDown"`.
 //! `Mod` is resolved to the backend's modifier key at event time, not here.
 

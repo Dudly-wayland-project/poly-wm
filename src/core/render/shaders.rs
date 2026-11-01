@@ -1,7 +1,7 @@
 // Ported from niri (GPL-3.0-or-later): src/render_helpers/shaders/mod.rs
 
 //! Shader programs used by the compositor: window shading, blur passes, window
-//! borders and drop shadows (`docs/plan.md` §10.3, §10.4).
+//! borders and drop shadows.
 //!
 //! Everything is GLES2 / GLSL 100. User shader files are assembled from a
 //! prelude (which declares the uniforms) plus the user's entry points, so a
@@ -629,7 +629,7 @@ impl Shaders {
     }
 
     /// Whether any active program reads `u_time`, which disables the damage
-    /// optimization (`docs/plan.md` §10.5).
+    /// optimization.
     pub fn uses_time(&self) -> bool {
         return self.window_time.values().any(|uses| return *uses) || self.blur_uses_time();
     }

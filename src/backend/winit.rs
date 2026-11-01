@@ -48,7 +48,7 @@ pub struct Winit {
     /// state is cleared here and the host's next `Redraw` re-queues it.
     deferred_redraw: bool,
     /// Kept so the dmabuf global can be disabled when a more capable one
-    /// becomes available (`docs/plan.md` §6).
+    /// becomes available.
     _dmabuf_global: DmabufGlobal,
 }
 

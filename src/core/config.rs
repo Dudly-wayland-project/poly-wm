@@ -2,9 +2,9 @@
 //! reporting and `reload-config`.
 //!
 //! The Lua loader itself lives in the `poly-config` crate; this module is the
-//! compositor-side half (`docs/plan.md` §11). Loading never fails startup: a
-//! broken file means the built-in defaults plus errors in the log (and, from
-//! M3, a Toast carrying the same messages).
+//! compositor-side half. Loading never fails startup: a broken file means the
+//! built-in defaults plus errors in the log and on-screen Toasts carrying the
+//! same messages.
 
 use poly_config::{Config, ConfigLoadResult, ConfigSource};
 use smithay::input::keyboard::XkbConfig;
@@ -14,7 +14,7 @@ use crate::state::State;
 use crate::utils::spawn;
 
 /// Write the annotated default configuration when there is none, returning
-/// where it went (`docs/plan.md` §11).
+/// where it went.
 ///
 /// Only a first run — a user with `--config`, `$POLY_CONFIG` or an existing
 /// file is never touched — and the file is created with `O_EXCL`, so two
@@ -63,7 +63,7 @@ pub fn toast_messages(result: &ConfigLoadResult) -> Vec<String> {
 }
 
 /// Show a load outcome on screen. Used at startup and on `reload-config`, so
-/// a broken file is visible without a terminal (`docs/plan.md` §10.5).
+/// a broken file is visible without a terminal.
 pub fn show_toasts(state: &mut State, result: &ConfigLoadResult) {
     let now = std::time::Instant::now();
     let messages = toast_messages(result);
@@ -139,7 +139,7 @@ pub fn watch(state: &mut State) {
 ///
 /// Polling instead of `inotify` keeps this working on any filesystem and for a
 /// file that does not exist yet; the cost is one `stat` per watched file per
-/// half second (`docs/plan.md` §15).
+/// half second.
 pub fn poll_watch(state: &mut State) {
     let Some(path) = state.core.config_watcher.changed() else {
         return;
@@ -150,8 +150,8 @@ pub fn poll_watch(state: &mut State) {
 
 /// Make a freshly loaded configuration the live one.
 ///
-/// Bindings, input settings and the child environment switch right away; the
-/// rest is read when it is needed (the layout engine in M3, and so on).
+/// Bindings, input, layout, decorations, outputs, XWayland and the child
+/// environment are all applied here; shaders recompile on the next frame.
 pub fn apply_config(
     state: &mut State,
     config: Config,
@@ -179,11 +179,10 @@ pub fn apply_config(
     apply_cursor(state);
     crate::core::layout::LayoutManager::relayout(state);
     // `outputs` is a full re-apply: `reload-config` is how runtime changes made
-    // with `poly msg output` are put back to the file's values (`docs/plan.md`
-    // §12).
+    // with `poly msg output` are put back to the file's values.
     crate::core::output::apply_config(state);
     // A reload may add, remove or edit shader files; a new generation makes
-    // `Shaders::prepare` recompile on the next frame (`docs/plan.md` §10.3).
+    // `Shaders::prepare` recompile on the next frame.
     state.core.config_generation = state.core.config_generation.wrapping_add(1);
     state.core.shaders.mark_dirty();
     // `xwayland.enable` can be turned on by an edit; a satellite that is
@@ -193,9 +192,10 @@ pub fn apply_config(
     state.core.queue_redraw_all();
 }
 
-/// Push `environment` into the environment of every future child (`docs/
-/// plan.md` §11: no mutation of our own environment, which is unsound once
-/// threads exist).
+/// Push `environment` into the environment of every future child.
+///
+/// The process environment is never mutated here: that is unsound once threads
+/// exist.
 pub fn apply_child_environment(config: &Config) {
     // The pointer first, so an explicit `environment` entry still wins over it.
     apply_cursor_environment(&config.general.cursor);

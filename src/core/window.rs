@@ -140,7 +140,7 @@ fn send_initial_configure(state: &mut State, root: &WlSurface) {
 }
 
 /// The effective `no_csd` setting of a window: `general.prefer_no_csd`, unless
-/// the first matching window rule overrides it (`docs/plan.md` §10.2).
+/// the first matching window rule overrides it.
 pub fn window_no_csd(state: &State, window: &Window) -> bool {
     let identity = window_title_and_app_id(window);
     let (app_id, title) = identity.as_pair();

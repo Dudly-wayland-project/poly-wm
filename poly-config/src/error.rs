@@ -1,5 +1,5 @@
 //! Configuration errors: collected with field paths instead of failing fast,
-//! so one load reports everything that is wrong (`docs/plan.md` §11).
+//! so one load reports everything that is wrong.
 
 use std::fmt;
 use std::path::PathBuf;

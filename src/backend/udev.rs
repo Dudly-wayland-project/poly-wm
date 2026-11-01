@@ -745,7 +745,7 @@ impl Udev {
                 .map(|color| return color.to_floats())
                 .unwrap_or([0.0, 0.0, 0.0, 1.0]);
 
-            // M0 never scans out client buffers directly: the compositor renders
+            // The compositor never scans out client buffers directly: it renders
             // into its own swapchain and scans that out. This keeps the element
             // handling simple and always correct.
             let frame_mode = FrameFlags::empty();

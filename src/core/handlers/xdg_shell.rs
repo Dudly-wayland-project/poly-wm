@@ -4,8 +4,7 @@
 //!
 //! Mapping hands the window to the layout engine, which decides its rectangle
 //! before it enters the space. This module also validates client-side
-//! move/resize drags against the pointer grab that started them
-//! (`docs/plan.md` §9.5).
+//! move/resize drags against the pointer grab that started them.
 
 use smithay::desktop::{PopupKind, Window};
 use smithay::input::pointer::{CursorImageStatus, Focus, GrabStartData};
@@ -146,8 +145,9 @@ impl XdgShellHandler for State {
         crate::core::popups::start_popup_grab(self, surface, &seat, serial);
     }
 
-    // M0 has no tiling yet: acknowledge window state requests with a configure
-    // that does not set the state, so clients are not left waiting.
+    // Maximize and minimize are not implemented: acknowledge them with a
+    // configure that does not set the state, so clients are not left waiting.
+    // Tiling and fullscreen are owned by the layout engine.
     fn maximize_request(&mut self, surface: ToplevelSurface) {
         surface.send_configure();
     }
@@ -175,8 +175,7 @@ impl XdgShellHandler for State {
     }
 }
 
-/// The grab data a `move_request`/`resize_request` is validated against
-/// (`docs/plan.md` §9.5).
+/// The grab data a `move_request`/`resize_request` is validated against.
 ///
 /// A request is honored only when
 ///

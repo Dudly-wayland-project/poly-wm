@@ -1,4 +1,4 @@
-//! The default configuration written on first run (`docs/plan.md` §11).
+//! The default configuration written on first run.
 //!
 //! Poly runs without a configuration file (the built-in defaults are niri's),
 //! but a user with no file has nothing to edit. When none is found the
@@ -74,7 +74,7 @@ return {
     ["Mod+Down"]    = "focus-down",
     ["Mod+Shift+Left"] = "move-window-left",
     ["Mod+Shift+Right"] = "move-window-right",
-    -- Workspaces: the vertical stack of `docs/plan.md` §9.6.
+    -- Workspaces: one vertical stack per output.
     ["Mod+Page_Up"]   = "focus-workspace-up",
     ["Mod+Page_Down"] = "focus-workspace-down",
     ["Mod+1"]         = { focus_workspace = 1 },
@@ -82,7 +82,7 @@ return {
     ["Mod+3"]         = { focus_workspace = 3 },
     ["Mod+O"]         = "toggle-overview",
     ["Mod+R"]         = "reload-config",
-    -- Mouse bindings move and resize windows (`docs/plan.md` §9.5).
+    -- Mouse bindings move and resize windows.
     ["Mod+MouseLeft"]  = "move-window",
     ["Mod+MouseRight"] = "resize-window",
     -- Media keys are passed through by `xkb`; bind them here when the session

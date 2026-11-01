@@ -10,8 +10,8 @@
 //! Every visual change also bumps the window's *visual epoch*. The epoch
 //! namespaces the id of the window's surface element, so the damage tracker
 //! treats it as a new element and repaints the whole window exactly once when
-//! the radius, the focus state or the cursor position (for `u_cursor`) changes
-//! (`docs/plan.md` §10.5). Shader reloads bump every epoch through
+//! the radius, the focus state or the cursor position (for `u_cursor`) changes.
+//! Shader reloads bump every epoch through
 //! [`Decorations::begin_frame`].
 
 use std::collections::{HashMap, HashSet};

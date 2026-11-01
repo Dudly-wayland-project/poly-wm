@@ -22,7 +22,7 @@ varying vec2 v_coords;
 uniform float tint;
 #endif
 
-// --- Injected by Poly (`docs/plan.md` §10.3) --------------------------------
+// --- Injected by Poly --------------------------------------------------------
 
 // Output scale (physical pixels per logical pixel).
 uniform float poly_scale;

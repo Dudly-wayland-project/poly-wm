@@ -6,7 +6,7 @@
 //! [`Core`] owns everything that is not tied to how frames reach the screen:
 //! the space of windows, the wayland protocol state, the seat, per-output
 //! redraw scheduling and the software cursor. Backends render it and feed it
-//! input (`docs/plan.md` §5).
+//! input.
 
 pub mod actions;
 pub mod capture;
@@ -131,9 +131,9 @@ pub struct Core {
     pub config: Config,
     /// Mapped-window state, per-output tiling and the Lua layout bridge.
     pub layout: crate::core::layout::LayoutManager,
-    /// Where the configuration came from (`reload-config`, the M6 watcher).
+    /// Where the configuration came from (`reload-config`, the file watcher).
     pub config_source: ConfigSource,
-    /// Every file the configuration loaded, for the M6 reload watcher.
+    /// Every file the configuration loaded, for the reload watcher.
     pub config_includes: Vec<PathBuf>,
     /// The mod key when the configuration does not pick one: Super on a real
     /// session, Alt when nested inside another compositor (winit).
@@ -152,7 +152,7 @@ pub struct Core {
     /// The event loop, for arming the binding repeat timer.
     pub event_loop_handle: LoopHandle<'static, State>,
     /// The IPC server: the socket, the connected clients and the event-stream
-    /// baseline (`docs/plan.md` §12).
+    /// baseline.
     pub ipc: crate::core::ipc::IpcServer,
     /// Accumulates high-resolution wheel and touchpad scrolling.
     pub scroll_tracker_horizontal: ScrollTracker,
@@ -258,7 +258,7 @@ pub struct Core {
     /// `xdg_toplevel_icon_manager_v1`.
     #[allow(dead_code)]
     pub xdg_toplevel_icon_state: XdgToplevelIconManager,
-    /// `xdg_toplevel_tag_manager_v1` (window rule tags).
+    /// `xdg_toplevel_tag_manager_v1` (toplevel tags and descriptions).
     #[allow(dead_code)]
     pub xdg_toplevel_tag_state: XdgToplevelTagManager,
     /// `zxdg_decoration_manager_v1`.
@@ -287,9 +287,9 @@ pub struct Core {
     pub input_method_state: InputMethodManagerState,
     /// `zwp_virtual_keyboard_manager_v1`.
     ///
-    /// Not strictly required by the plan (optional there), but fcitx5's
-    /// Wayland input-method frontend refuses to initialize without it, so it
-    /// is effectively mandatory for the M2 IME acceptance test.
+    /// Not strictly required by the protocol set, but fcitx5's Wayland
+    /// input-method frontend refuses to initialize without it, so it is
+    /// effectively mandatory for a working IME.
     #[allow(dead_code)]
     pub virtual_keyboard_state: VirtualKeyboardManagerState,
     /// `zwlr_layer_shell_v1` (status bars, notifications, launchers).
@@ -326,7 +326,7 @@ pub struct Core {
     pub layer_focus: Option<WlSurface>,
     /// Foreign-toplevel handles handed to taskbars, keyed by root surface.
     pub foreign_toplevels: HashMap<WlSurface, ForeignToplevelHandle>,
-    /// The running popup grab, if any (`docs/plan.md` §9).
+    /// The running popup grab, if any.
     pub popup_grab: Option<crate::core::popups::PopupGrabState>,
     /// The root surface of the window that last held keyboard focus, so that
     /// focus can be returned to it after a launcher closes.
@@ -341,11 +341,10 @@ pub struct Core {
     /// section on the next turn, before the frame is rendered.
     pub output_config_pending: bool,
     /// The root configuration file and its include closure, watched for edits
-    /// so that saving the file reloads it (`docs/plan.md` §11).
+    /// so that saving the file reloads it.
     pub config_watcher: crate::utils::watcher::ConfigWatcher,
     /// The XWayland integration, when `xwayland.enable` is on: the X11 sockets
-    /// and the watch that starts `xwayland-satellite` on demand
-    /// (`docs/plan.md` §13).
+    /// and the watch that starts `xwayland-satellite` on demand.
     pub satellite: Option<crate::utils::xwayland::satellite::Satellite>,
     /// The session-lock state machine (ext-session-lock).
     pub lock_state: LockState,
@@ -364,7 +363,7 @@ pub struct Core {
     /// Cached solid buffers for the workspace overview, per output.
     pub overview_buffers: HashMap<Output, OverviewBuffers>,
 
-    /// Compiled window, border, shadow and blur programs (`docs/plan.md` §10).
+    /// Compiled window, border, shadow and blur programs.
     pub shaders: crate::core::render::Shaders,
     /// Per-window border/shadow/blur element caches.
     pub decorations: crate::core::render::Decorations,
@@ -506,7 +505,7 @@ impl Core {
         let presentation_state =
             PresentationState::new::<State>(&display_handle, Monotonic::ID as u32);
 
-        // M2 protocol globals. Most of these need no logic from Poly: Smithay
+        // Protocol globals. Most of these need no logic from Poly: Smithay
         // wires them into the surface state that renderers and windows consult.
         let single_pixel_buffer_state = SinglePixelBufferState::new::<State>(&display_handle);
         let fractional_scale_state = FractionalScaleManagerState::new::<State>(&display_handle);
@@ -537,7 +536,7 @@ impl Core {
 
         // When `prefer_no_csd` is on, clients see the decoration globals and we
         // answer `ServerSide`: they drop their decorations, Poly draws its own
-        // (rounded corners, border, shadow — M4). With it off, the globals are
+        // (rounded corners, border, shadow). With it off, the globals are
         // hidden and clients fall back to client-side decorations.
         let prefer_no_csd = config.general.prefer_no_csd;
         let xdg_decoration_state =
@@ -563,7 +562,7 @@ impl Core {
 
         // Screenshots (`grim`, `wl-mirror`, ...). The two source managers and
         // the copy manager are one feature: a client that finds only one half
-        // refuses to capture (`docs/plan.md` §17).
+        // refuses to capture.
         let image_capture_source_state = ImageCaptureSourceState::new();
         let output_capture_source_state = OutputCaptureSourceState::new::<State>(&display_handle);
         let image_copy_capture_state = ImageCopyCaptureState::new::<State>(&display_handle);
@@ -602,8 +601,8 @@ impl Core {
         }
         let layout = crate::core::layout::LayoutManager::new(&config, layout_programs);
 
-        // Shader files and the configuration can change under us
-        // (`docs/plan.md` §10.3, §11). Recompiling needs the GL context, which
+        // Shader files and the configuration can change under us.
+        // Recompiling needs the GL context, which
         // only exists while rendering, so the timer only stats the shader files
         // and sets a flag `Shaders::prepare` picks up on the next frame; the
         // configuration is small enough to reload right here.

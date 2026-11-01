@@ -5,7 +5,7 @@
 //! window, runs a dual Kawase blur (or a user replacement) and composites the
 //! result into the window.
 //!
-//! Correctness rule (`docs/plan.md` §10.3): the offscreen backdrop contains only
+//! Correctness rule: the offscreen backdrop contains only
 //! the elements *below* the blurred window. The blur element is therefore
 //! pushed after the window in the front-to-back list, so it is drawn before it.
 
@@ -77,7 +77,7 @@ impl BlurProgram {
     ///
     /// The raw GL programs are intentionally leaked on reload: the renderer
     /// does not expose a public way to schedule their deletion, and shader
-    /// reloads are rare (`docs/plan.md` §10.3).
+    /// reloads are rare.
     pub fn compile(
         renderer: &mut GlesRenderer,
         down_src: &str,

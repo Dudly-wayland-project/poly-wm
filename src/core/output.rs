@@ -1,5 +1,5 @@
 //! Output configuration: the `outputs` section of the configuration file, plus
-//! the runtime changes `poly msg output` can make (`docs/plan.md` §12).
+//! the runtime changes `poly msg output` can make.
 //!
 //! Two entry points share one implementation:
 //!

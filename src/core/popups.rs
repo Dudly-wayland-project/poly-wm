@@ -1,6 +1,6 @@
 // Ported from niri (GPL-3.0-or-later): src/handlers/xdg_shell.rs (grab, unconstrain_popup)
 //
-//! Popup placement and popup grabs (`docs/plan.md` §7, §9).
+//! Popup placement and popup grabs.
 //!
 //! Popups are positioned by their client-provided positioner, which Poly nudges
 //! so the popup stays inside the parent's output. A popup that asked for an

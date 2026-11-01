@@ -26,7 +26,7 @@
 //!   assume the whole buffer changed — which is exactly what we write.
 //!
 //! Only `Xrgb8888` is offered, matching what `ext-image-copy-capture` accepts
-//! here (`docs/plan.md` §17).
+//! here.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

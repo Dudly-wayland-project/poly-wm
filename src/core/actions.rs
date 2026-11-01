@@ -4,8 +4,8 @@
 //! (`AGENTS.md` §2.6).
 //!
 //! Lua key bindings, the IPC `Action` request and `poly msg action` all end up
-//! here. Actions that need the layout engine (M3) are accepted, logged and
-//! skipped, so a configuration written for a later milestone still starts.
+//! here. Layout actions are forwarded to the active workspace's Lua layout,
+//! when it has one; every other action acts on the compositor state directly.
 
 use poly_ipc::Action;
 use smithay::desktop::Window;
@@ -22,7 +22,7 @@ use crate::utils::spawn;
 ///
 /// `poly msg action move-window` has no button behind it. The grabs only record
 /// the value (they end when no button is pressed any more), so a synthetic one
-/// is enough (`docs/plan.md` §9.5).
+/// is enough.
 const SYNTHETIC_BUTTON: u32 = 0x110; // BTN_LEFT
 
 /// Run an action.
@@ -119,7 +119,7 @@ pub fn do_action(state: &mut State, action: Action, button: Option<u32>) {
 /// Run an action that came from IPC rather than from a binding.
 ///
 /// The vocabulary is the same; only a drag action differs, since there is no
-/// button press and no pointer grab behind the request (`docs/plan.md` §9.5).
+/// button press and no pointer grab behind the request.
 pub fn do_ipc_action(state: &mut State, action: Action) {
     match action {
         Action::MoveWindow => match ipc_drag_target(state) {
@@ -135,7 +135,7 @@ pub fn do_ipc_action(state: &mut State, action: Action) {
 }
 
 /// The window an IPC drag acts on: the one under the pointer, else the focused
-/// one (`docs/plan.md` §9.5, §12).
+/// one.
 fn ipc_drag_target(state: &mut State) -> Option<Window> {
     let pointer = state.core.seat.get_pointer()?;
     let location = pointer.current_location();
@@ -174,7 +174,7 @@ fn close_window(state: &mut State) {
 /// `move-window`: drag the window under the pointer around.
 ///
 /// `window` overrides the window under the pointer; IPC requests use it because
-/// the pointer may be somewhere else entirely (`docs/plan.md` §9.5).
+/// the pointer may be somewhere else entirely.
 fn start_move(state: &mut State, button: u32, target: Option<Window>) {
     let Some(pointer) = state.core.seat.get_pointer() else {
         return;
@@ -193,7 +193,7 @@ fn start_move(state: &mut State, button: u32, target: Option<Window>) {
     };
 
     // Grabbing a window also activates it: the binding consumed the press, so
-    // the regular click-to-focus path never ran (`docs/plan.md` §9.5).
+    // the regular click-to-focus path never ran.
     crate::core::window::focus_window(
         state,
         &window,

@@ -80,7 +80,7 @@ pub enum Action {
     /// Switch the current output to the next configured layout.
     CycleLayout,
 
-    /// Focus the workspace above the active one (`docs/plan.md` §9.6).
+    /// Focus the workspace above the active one.
     FocusWorkspaceUp,
     /// Focus the workspace below the active one. Creates one at the bottom.
     FocusWorkspaceDown,

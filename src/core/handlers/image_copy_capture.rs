@@ -16,7 +16,7 @@
 //! what changed — and costs nothing while the screen is idle.
 //!
 //! The protocol only supports `Xrgb8888` shm buffers for now, which is enough
-//! for every client that matters today (`docs/plan.md` §17).
+//! for every client that matters today.
 //!
 //! Toplevel capture (`grim -T`) needs `ext-foreign-toplevel-image-capture-
 //! source-v1`; Poly only implements output capture, so those clients see no

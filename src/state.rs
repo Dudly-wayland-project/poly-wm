@@ -50,7 +50,7 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
 
     // Configuration: locate and load, reporting every problem. A broken file
     // is not fatal — the compositor starts with the built-in defaults and the
-    // errors in the log (`docs/plan.md` §11).
+    // errors in the log.
     let mut config_source = poly_config::locate_config(args.config.as_deref())?;
     // A first run has nothing to edit: write the annotated template so that
     // "edit `~/.config/poly/config.lua`" is true, and load it right away
@@ -62,7 +62,7 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
     let loaded = crate::core::config::load(&config_source);
     let config_errors = crate::core::config::toast_messages(&loaded);
     // Best-effort `errors.dbus` from the file, which also exists when the file
-    // did not load (`docs/plan.md` §14).
+    // did not load.
     let config_notifications = loaded.error_notifications;
     let config = loaded.config.unwrap_or_default();
     let layout_programs = loaded.layout_programs;
@@ -84,7 +84,7 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
     core.config_includes = config_includes;
 
     // The IPC socket lives next to the wayland socket and tells clients how to
-    // reach us (`docs/plan.md` §12). Binding happens before the backend starts,
+    // reach us. Binding happens before the backend starts,
     // so a compositor that cannot create its socket fails before it takes over
     // the TTY.
     let ipc_path = ipc_socket_path(&socket_name)?;
@@ -103,8 +103,7 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
     // frame already shows the configured mode, scale, transform and background.
     crate::core::output::apply_config(&mut state);
     // X11 sockets come up before anything is spawned, so that the startup
-    // commands and the `--` command already find `DISPLAY` (`docs/plan.md`
-    // §13).
+    // commands and the `--` command already find `DISPLAY`.
     crate::utils::xwayland::satellite::setup(&mut state);
     // Editing the file (or a file it includes) reloads it from now on.
     crate::core::config::watch(&mut state);
@@ -116,7 +115,7 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
     crate::core::ipc::config_loaded(&mut state, !config_errors.is_empty());
 
     // Configuration problems found at startup are shown on screen: without a
-    // terminal there is otherwise no trace of a typo (`docs/plan.md` §10.5).
+    // terminal there is otherwise no trace of a typo.
     let now = std::time::Instant::now();
     // A first run says where the configuration it just wrote lives; a user
     // without a terminal would otherwise never find it.

@@ -69,7 +69,7 @@ pub fn workspaces(state: &State) -> Vec<Workspace> {
             let is_focused = is_focused_output && snapshot.active;
             workspaces.push(Workspace {
                 // Workspaces have no ids: the IPC layer exposes 1-based numbers
-                // inside the output's stack (`docs/plan.md` §9.6).
+                // inside the output's stack.
                 index: snapshot.index + 1,
                 output: Some(name.clone()),
                 is_active: snapshot.active,
@@ -127,7 +127,7 @@ pub fn windows(state: &State) -> Vec<Window> {
         }
     }
     // Windows that no workspace holds yet: mapped but not placed, or pulled out
-    // of the layout by an interactive drag (`docs/plan.md` §9.5).
+    // of the layout by an interactive drag.
     for id in state.core.layout.ids() {
         if !seen.insert(id) {
             continue;

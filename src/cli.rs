@@ -93,7 +93,7 @@ enum Sub {
     ///
     /// Screen recording through `xdg-desktop-portal` (`OBS`, Firefox,
     /// `wf-recorder --portal`) needs the portal to talk to Poly instead of the
-    /// desktop the session was logged into (docs/plan.md §17).
+    /// desktop the session was logged into.
     Portal {
         #[command(subcommand)]
         portal: PortalCmd,

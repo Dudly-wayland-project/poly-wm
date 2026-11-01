@@ -25,7 +25,7 @@ impl DmabufHandler for State {
     ) {
         // Accept the buffer: the render path imports it into the primary
         // renderer when it is first drawn, and a buffer we cannot import simply
-        // fails to render (`docs/plan.md` §6).
+        // fails to render.
         trace!(
             "client offered a dmabuf ({:?}, {}x{})",
             dmabuf.format().code,

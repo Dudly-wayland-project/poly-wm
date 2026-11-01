@@ -7,10 +7,9 @@
 //! in reverse). Per output that is: cursor, Overlay layers, Toasts, Top layers,
 //! fullscreen windows, floating windows, the dragged window, the tiled windows,
 //! Bottom/Background layers. A window itself contributes its popups, its
-//! surfaces, its border, its shadow and its blur backdrop, in that order
-//! (`docs/plan.md` §10.1).
+//! surfaces, its border, its shadow and its blur backdrop, in that order.
 //!
-//! The workspace overview (`docs/plan.md` §9.7) follows niri: the cards are
+//! The workspace overview follows niri: the cards are
 //! opaque plates of the zoomed workspace, the active one centred with its
 //! neighbours peeking in above and below, a soft shadow behind the stack and an
 //! opaque backdrop around it. Windows keep their rounding, border and shadow,
@@ -88,7 +87,7 @@ use self::decorations::DecorationInputs;
 use self::visual::{CornerRadius, WindowVisuals};
 
 /// Clients get at most one frame callback per this interval, even if we render
-/// faster than the output refreshes (`docs/plan.md` §9.4).
+/// faster than the output refreshes.
 const FRAME_CALLBACK_THROTTLE: Option<Duration> = Some(Duration::from_millis(995));
 
 /// Build the elements for one frame of `output`: space contents plus cursor.
@@ -110,7 +109,7 @@ where
     crate::core::handlers::refresh_cursor_sessions(core);
 
     // Shaders are compiled lazily, on the first frame and after a reload or an
-    // edit of a shader file (`docs/plan.md` §10.3, §10.4). A failing file keeps
+    // edit of a shader file. A failing file keeps
     // the previous program and reports through a Toast.
     core.shaders.prepare(
         &core.config,
@@ -508,7 +507,7 @@ fn push_card_layers<R>(
 /// Add the workspace cards, their shadows and the backdrop of the overview.
 ///
 /// This mirrors niri's `Monitor::render_workspaces` / `render_workspace_shadows`
-/// order (`docs/plan.md` §9.7): every card is an opaque plate the size of the
+/// order: every card is an opaque plate the size of the
 /// zoomed workspace, the whole stack casts a soft shadow, and an opaque
 /// backdrop fills the desktop around it. Everything is pushed after the
 /// windows, i.e. *behind* them, so the cards read as backgrounds. Inside every
@@ -860,11 +859,11 @@ fn push_closing<R>(
 }
 
 /// Add one window: popups, surfaces, border, shadow and blur backdrop, front to
-/// back (`docs/plan.md` §10.1).
+/// back.
 ///
 /// The blur element is pushed last, so the damage tracker captures the
 /// framebuffer before drawing the window itself: the backdrop only ever
-/// contains what is *below* this window (§10.3).
+/// contains what is *below* this window.
 #[allow(clippy::too_many_arguments)]
 fn push_window<R>(
     elements: &mut Vec<OutputElements<R>>,
@@ -1017,7 +1016,7 @@ fn push_window<R>(
     };
 
     // Popups belong to the window but are not clipped: they may extend past
-    // the rounded corners and have their own buffers (`docs/plan.md` §10.2).
+    // the rounded corners and have their own buffers.
     // The overview leaves them out, and so does a window that is still scaling
     // in: their offsets are not rescaled with the surface. Close snapshots do
     // include them while the window is at its settled size.

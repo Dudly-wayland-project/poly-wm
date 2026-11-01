@@ -1,4 +1,4 @@
-//! The IPC server (`docs/plan.md` §12, `docs/ipc.md`).
+//! The IPC server.
 //!
 //! One Unix socket per compositor, JSON objects one per line. Requests are
 //! answered one-for-one; a connection that asks for [`poly_ipc::Request::EventStream`]

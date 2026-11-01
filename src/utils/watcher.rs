@@ -1,4 +1,4 @@
-//! Configuration file watching (`docs/plan.md` §11, M6).
+//! Configuration file watching.
 //!
 //! Polling the modification time of a handful of files every 500 ms is enough
 //! for a configuration that is edited by hand: it needs no `inotify` handle,

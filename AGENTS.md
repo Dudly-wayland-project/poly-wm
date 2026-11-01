@@ -17,10 +17,8 @@ keep them stable when editing this file.
 - `poly-config/src/config.rs` defines the configuration data model;
   `poly-config/src/lua.rs` and `poly-config/src/layout.rs` parse it.
   `docs/config.md` must stay in sync with both.
-- Some old source comments cite `docs/plan.md` for historical design notes.
-  That file is not part of the current checkout. The maintained documentation
-  is `docs/config.md`, `docs/ipc.md`, `docs/building.md`, `docs/installing.md`
-  and this guide.
+- The maintained documentation is `docs/config.md`, `docs/ipc.md`,
+  `docs/building.md`, `docs/installing.md` and this guide.
 
 ## 2. Engineering conventions
 

@@ -1,6 +1,6 @@
 // Ported from niri (GPL-3.0-or-later): src/ui/config_error_notification.rs
 
-//! Compositor-drawn Toasts (`docs/plan.md` §14).
+//! Compositor-drawn Toasts.
 //!
 //! Configuration, layout and shader errors must be visible without a second
 //! monitor showing a log, so they are rasterized into a memory buffer and drawn

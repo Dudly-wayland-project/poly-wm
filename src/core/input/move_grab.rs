@@ -1,7 +1,7 @@
 // The grab state machine follows niri (GPL-3.0-or-later): src/input/move_grab.rs
 // niri keeps the tiled/floating/cross-output strategies in its layout engine;
-// Poly has no layout engine yet (M3), so this is the framework plus plain
-// floating movement inside the output bounding box.
+// Poly implements the tiled reorder, floating and cross-output movement
+// strategies here.
 
 //! Interactive window movement (`Mod+MouseLeft`, or a client's CSD drag).
 //!
@@ -362,7 +362,7 @@ impl PointerGrab<State> for MoveGrab {
 }
 
 /// Keep at least `clamp(size/4, 10, 75)` pixels of the window inside the
-/// bounding box of the output work areas (`docs/plan.md` §9.5), while still
+/// bounding box of the output work areas, while still
 /// allowing the rest to hang off the screen.
 fn clamp_to_visible(
     state: &State,

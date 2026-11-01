@@ -24,7 +24,7 @@ varying vec2 v_coords;
 uniform float tint;
 #endif
 
-// --- Injected by Poly (`docs/plan.md` §10.4) --------------------------------
+// --- Injected by Poly --------------------------------------------------------
 
 // Output scale (physical pixels per logical pixel).
 uniform float poly_scale;
@@ -73,6 +73,6 @@ uniform vec2 u_cursor;
 // Anti-aliased coverage of a rounded rectangle (`rounding_alpha.frag`).
 float poly_rounding_alpha(vec2 coords, vec2 size, vec4 corner_radius);
 
-// The user entry point (`docs/plan.md` §10.4): transform the sampled window
+// The user entry point: transform the sampled window
 // color, which is premultiplied. `uv` is in `[0, 1]` over the window geometry.
 vec4 window_shade(vec2 uv, vec4 color);

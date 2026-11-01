@@ -11,7 +11,7 @@
 //! macro cannot express "draw this variant through the inner GLES frame".
 //!
 //! [`WindowElement`] is the per-surface wrapper that clips to the window's
-//! rounded rectangle and runs the window shader (`docs/plan.md` §10.2, §10.4).
+//! rounded rectangle and runs the window shader.
 
 use glam::{Mat3, Vec2};
 use smithay::backend::renderer::buffer_y_inverted;
@@ -45,7 +45,7 @@ use super::visual::CornerRadius;
 /// Client content can arrive as shared memory, dmabufs or EGL images, the
 /// cursor and the Toasts are uploaded from memory, and elements clone their
 /// textures. `AsGlesRenderer` is what lets us run GLSL 100 programs on both
-/// backends (`docs/plan.md` §10.4).
+/// backends.
 pub trait PolyRenderer:
     Renderer<TextureId: Clone + Send + 'static>
     + ImportAll
@@ -59,8 +59,7 @@ pub trait PolyRenderer:
     ///
     /// Elements that talk GL directly (blur, pixel shaders) draw through this.
     /// The udev `MultiFrame` forwards to its inner `GlesFrame`, which costs the
-    /// multi-GPU damage accumulation but is correct on a single GPU
-    /// (`docs/plan.md` §10.3).
+    /// multi-GPU damage accumulation but is correct on a single GPU.
     ///
     /// This lives on the renderer (not on the frame) because a
     /// `for<'a, 'b> R::Frame<'a, 'b>: Trait<'a, 'b>` bound trips over a
@@ -106,7 +105,7 @@ impl PolyRenderer for GlesRenderer {
     }
 }
 
-/// The `u_*` uniforms a window shader receives (`docs/plan.md` §10.4).
+/// The `u_*` uniforms a window shader receives.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WindowUniforms {
     /// Seconds since the compositor started.
@@ -528,7 +527,7 @@ impl RenderElement<GlesRenderer> for ShaderElement {
 
 /// A Bottom/Background layer surface scaled into one workspace card and
 /// cropped to it, with the card index as the element-id namespace so several
-/// copies of the same surface can live on one frame (`docs/plan.md` §9.7).
+/// copies of the same surface can live on one frame.
 pub type CardLayerElement<R> =
     NamespacedElement<CropRenderElement<RescaleRenderElement<WaylandSurfaceRenderElement<R>>>>;
 

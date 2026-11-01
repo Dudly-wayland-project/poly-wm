@@ -1,8 +1,7 @@
 // Ported from niri (GPL-3.0-or-later): src/utils/xwayland/satellite.rs
 // Copyright (c) Ivan Molodetskikh and niri contributors.
 
-//! Starting `xwayland-satellite` when an X11 client needs it
-//! (`docs/plan.md` §13).
+//! Starting `xwayland-satellite` when an X11 client needs it.
 //!
 //! An X11 client announces itself by connecting to one of the sockets
 //! [`super::setup_connection`] created. Nothing accepts those connections until

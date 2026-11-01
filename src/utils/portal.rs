@@ -5,7 +5,7 @@
 //! Wayland socket it was handed **at startup**, both taken from the environment
 //! of the systemd user manager — not from the environment of the client that
 //! asks for a screencast. A Poly session therefore has to move that environment
-//! over before a portal client can reach us (`docs/plan.md` §17):
+//! over before a portal client can reach us:
 //!
 //! ```text
 //! XDG_CURRENT_DESKTOP=POLY   -> picks poly-portals.conf and wlr's POLY config
@@ -291,7 +291,7 @@ fn ensure_session(display: &str, force: bool) -> anyhow::Result<()> {
     return Ok(());
 }
 
-/// Warn about the two user-side files `docs/plan.md` §17 documents.
+/// Warn about the two user-side portal configuration files.
 fn check_config_files() {
     let Some(config_home) = config_home() else {
         return;

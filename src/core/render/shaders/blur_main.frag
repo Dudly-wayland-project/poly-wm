@@ -9,7 +9,7 @@
 // which turned the whole blur into black). This variant only uses `fract()`.
 //
 // Guarded because a custom `finish()` may `#include "poly/noise.glsl"`, which
-// defines the very same function (`docs/plan.md` §10.3).
+// defines the very same function.
 #ifndef POLY_NOISE_GLSL
 #define POLY_NOISE_GLSL
 float poly_hash12(vec2 p) {

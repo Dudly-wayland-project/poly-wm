@@ -523,7 +523,7 @@ fn on_pointer_axis<B: InputBackend>(state: &mut State, event: &B::PointerAxisEve
     }
 
     // The overview pages through workspaces with the wheel instead of
-    // scrolling a client (`docs/plan.md` §9.7). Ticks are accumulated so a
+    // scrolling a client. Ticks are accumulated so a
     // touchpad (which has no `v120` units) does not page on every tiny event.
     if state.core.layout.overview_visible(Instant::now()) {
         let vertical = event.amount_v120(Axis::Vertical).unwrap_or_else(|| {
@@ -832,7 +832,7 @@ fn on_tablet_tool_button<B: InputBackend>(state: &mut State, event: &B::TabletTo
     state.core.queue_redraw_all();
 }
 
-/// The button code to binding trigger mapping of `docs/plan.md` §8.
+/// Map a pointer button to the binding trigger it activates.
 fn trigger_from_button(button: MouseButton) -> Option<Trigger> {
     return match button {
         MouseButton::Left => Some(Trigger::MouseLeft),
@@ -1005,7 +1005,7 @@ pub fn find_active_bind(
 
 /// Pointer bindings also match while the `window_drag.axis_lock` modifier is
 /// held: it is not part of the binding, but the drag start must still see the
-/// button press (`docs/plan.md` §9.5). Exact matches win, so a user can still
+/// button press. Exact matches win, so a user can still
 /// define a distinct `Mod+Shift+MouseLeft` binding.
 fn find_pointer_bind(
     state: &State,
@@ -1191,8 +1191,8 @@ fn clamp_to_space(state: &State, location: Point<f64, Logical>) -> Point<f64, Lo
 
 /// Map an absolute device position through the first output's geometry.
 ///
-/// M1 only has a single output (multi-output lands with the layout engine);
-/// this is the same simplification the absolute pointer path uses.
+/// Absolute devices are mapped through the first output's geometry;
+/// multi-output absolute positioning is not implemented yet.
 fn absolute_position_transformed<B: InputBackend>(
     state: &State,
     event: &impl AbsolutePositionEvent<B>,

@@ -1,7 +1,7 @@
 //! Poly configuration: Lua → Rust types, validation and error collection.
 //!
 //! The loader executes Lua and produces a [`Config`]; problems are collected
-//! with field paths instead of failing fast (`docs/plan.md` §11).
+//! with field paths instead of failing fast.
 
 // Project convention: every function body ends with an explicit `return`,
 // see rust-systems-dev coding-guidelines §2.9.

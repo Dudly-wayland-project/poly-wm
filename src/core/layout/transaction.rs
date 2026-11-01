@@ -6,7 +6,7 @@
 //! old-size buffer jump to its new place before the client has drawn the new
 //! size. The transaction blocks the commits of all windows in a reflow until
 //! the last one has acknowledged its configure, so the new layout appears in
-//! one step (niri's design, `docs/plan.md` §9).
+//! one step (niri's design).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};

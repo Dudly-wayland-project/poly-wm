@@ -12,8 +12,8 @@
 //!
 //! An event-stream client that stops reading must not slow the compositor down:
 //! its socket buffer fills, `write` returns `WouldBlock`, and further events pile
-//! up in a bounded queue. When the queue is full the client is disconnected
-//! (`docs/plan.md` §12). Rendering never blocks on a socket.
+//! up in a bounded queue. When the queue is full the client is disconnected.
+//! Rendering never blocks on a socket.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -407,7 +407,7 @@ fn process_request(state: &mut State, request: Request) -> Reply {
     };
 }
 
-/// The XWayland integration as it stands right now (`docs/plan.md` §13).
+/// The XWayland integration as it stands right now.
 ///
 /// `enabled` is what the compositor managed to set up, not what the file asked
 /// for: a satellite that cannot inherit sockets leaves the integration off, and

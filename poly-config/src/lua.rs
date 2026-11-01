@@ -11,7 +11,7 @@
 //!
 //! `poly.include("bindings.lua")` evaluates another file — resolved relative to
 //! the file that called it — and returns its value. Included files are tracked
-//! so the reload watcher (M6) knows what to watch. All problems are collected
+//! so the reload watcher knows what to watch. All problems are collected
 //! with field paths, and a runaway script is stopped by an instruction budget.
 //!
 //! A `theme.lua` next to the root file is not an include but an overlay: it is
@@ -42,7 +42,7 @@ use crate::layout::{LayoutPrograms, parse_outputs, parse_window_rules};
 use crate::locate::ConfigSource;
 use crate::lua_ext as lx;
 
-/// Maximum nesting of `poly.include` (`docs/plan.md` §11).
+/// Maximum nesting of `poly.include`.
 const MAX_INCLUDE_DEPTH: usize = 32;
 
 /// VM instructions one configuration may execute before it is aborted.
@@ -86,7 +86,7 @@ end
 pub struct ConfigLoadResult {
     /// The parsed configuration, or every problem found while loading it.
     pub config: Result<Config, ConfigError>,
-    /// Every file the load touched, for the reload watcher (M6).
+    /// Every file the load touched, for the reload watcher.
     ///
     /// This is what the watcher stats: the root file, everything
     /// `poly.include` pulled in, and the theme layer even when it does not
@@ -609,7 +609,7 @@ fn caller_file(lua: &Lua) -> Option<PathBuf> {
     return None;
 }
 
-/// Resolve a path the way the whole configuration does (`docs/plan.md` §11):
+/// Resolve a path the way the whole configuration does:
 /// `~` expands to the home directory, relative paths are relative to the file
 /// that wrote them.
 pub(crate) fn resolve_path(from_file: Option<&Path>, requested: &str) -> PathBuf {
@@ -875,7 +875,7 @@ fn parse_cursor(table: &Table, errors: &mut Errors) -> Cursor {
     return cursor;
 }
 
-/// Parse `errors = { dbus = false }` (`docs/plan.md` §14).
+/// Parse `errors = { dbus = false }`.
 fn parse_errors(table: &Table, errors: &mut Errors) -> crate::config::Errors {
     let mut result = crate::config::Errors::default();
     lx::warn_unknown(table, "errors", &["dbus"], errors);
@@ -885,8 +885,7 @@ fn parse_errors(table: &Table, errors: &mut Errors) -> crate::config::Errors {
     return result;
 }
 
-/// Parse `xwayland = { enable, satellite_path, on_demand, spawn_at_startup }`
-/// (`docs/plan.md` §13).
+/// Parse `xwayland = { enable, satellite_path, on_demand, spawn_at_startup }`.
 fn parse_xwayland(table: &Table, errors: &mut Errors) -> Xwayland {
     let mut xwayland = Xwayland::default();
     lx::warn_unknown(
@@ -1346,8 +1345,8 @@ fn parse_device(table: &Table, base: &str, errors: &mut Errors) -> Device {
             }
         };
     }
-    // `accel` is the spelling of the plan's example (§11); `accel_profile` is
-    // libinput's name. `accel_profile` wins when both are set.
+    // `accel` is accepted as an alias for libinput's `accel_profile`;
+    // `accel_profile` wins when both are set.
     let accel_profile = match lx::string(table, "accel_profile", base, errors) {
         Some(profile) => Some(profile),
         None => lx::string(table, "accel", base, errors),

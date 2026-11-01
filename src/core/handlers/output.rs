@@ -1,4 +1,4 @@
-//! Output handler: M0 only needs the global bookkeeping that smithay provides.
+//! Output handler: Smithay provides the global bookkeeping.
 
 use smithay::wayland::output::OutputHandler;
 

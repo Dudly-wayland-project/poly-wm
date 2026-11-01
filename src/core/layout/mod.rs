@@ -1,6 +1,6 @@
 // Ported from niri (GPL-3.0-or-later): src/layout/*, src/window/*
 
-//! Window state and layout (`docs/plan.md` §9).
+//! Window state and layout.
 //!
 //! This module is the compositor's source of truth for where a mapped window
 //! is: whether it is tiled or floating, which output it belongs to, its
@@ -44,7 +44,7 @@ use crate::core::window::{focus_window, root_surface};
 use crate::state::State;
 use transaction::{Transaction, TransactionWatcher};
 
-/// The compositor-managed fullscreen state of a window (`docs/plan.md` §9.4).
+/// The compositor-managed fullscreen state of a window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FullscreenMode {
     /// The compositor gives the window the whole output and covers Top layers.
@@ -85,7 +85,7 @@ pub struct ManagedWindow {
     /// A configure this window has not acknowledged yet.
     pending: Option<WindowPending>,
     /// Resolved visual settings: radius, opacity, border, shadow, blur and the
-    /// window shader (`docs/plan.md` §10.2).
+    /// window shader.
     pub visuals: crate::core::render::visual::WindowVisuals,
 }
 
@@ -199,7 +199,7 @@ impl ClosingWindow {
     }
 }
 
-/// One workspace in an output's vertical stack (`docs/plan.md` §9.6).
+/// One workspace in an output's vertical stack.
 ///
 /// A workspace owns its windows and its layout name: switching workspaces
 /// does not re-flow the windows on the other ones. `focus` remembers what had
@@ -384,8 +384,7 @@ impl Fade {
 /// The workspace overview: a zoomed-out view of every workspace of an output.
 ///
 /// The state is global (one switch for the whole session), while the geometry
-/// is per output: each output shows its own vertical stack (`docs/plan.md`
-/// §9.7).
+/// is per output: each output shows its own vertical stack.
 #[derive(Debug, Default)]
 struct Overview {
     /// Whether the overview should stay open once the animation ends.
@@ -497,7 +496,7 @@ pub struct PlacedWindow<'a> {
     pub card: Rectangle<i32, Logical>,
 }
 
-/// One workspace of one output, as reported over IPC (`docs/plan.md` §12).
+/// One workspace of one output, as reported over IPC.
 pub struct WorkspaceSnapshot {
     /// 0-based index in the output's vertical stack.
     pub index: usize,
@@ -513,7 +512,7 @@ pub struct WorkspaceSnapshot {
     pub floating: Vec<u64>,
 }
 
-/// One managed window, as reported over IPC (`docs/plan.md` §12).
+/// One managed window, as reported over IPC.
 pub struct WindowSnapshot {
     /// The stable id.
     pub id: u64,
@@ -547,7 +546,7 @@ struct ReleasedTransaction {
 }
 
 /// Where a tiled window sat before an interactive drag pulled it out of the
-/// layout (`docs/plan.md` §9.5). Escape puts it back here.
+/// layout. Escape puts it back here.
 #[derive(Debug, Clone)]
 pub struct TiledSlot {
     /// The output whose tiled list held the window.
@@ -592,7 +591,7 @@ pub struct LayoutManager {
     animations_running: bool,
     dirty_space: bool,
     warned: HashSet<String>,
-    /// Workspace overview state (`docs/plan.md` §9.7).
+    /// Workspace overview state.
     overview: Overview,
     /// Card scale at full overview, from `overview.zoom`.
     overview_zoom: f64,
@@ -883,8 +882,7 @@ impl LayoutManager {
             });
     }
 
-    /// The workspace stack of `output`, for IPC and status bars
-    /// (`docs/plan.md` §12).
+    /// The workspace stack of `output`, for IPC and status bars.
     ///
     /// The index is 0-based here; the IPC layer exposes 1-based numbers.
     pub fn workspaces_of(&self, output: &smithay::output::Output) -> Vec<WorkspaceSnapshot> {
@@ -1596,7 +1594,7 @@ impl LayoutManager {
         return Some((context, tiled, floating, layout_name));
     }
 
-    /// Toggle the focused window between tiled and floating (`docs/plan.md` §9.3).
+    /// Toggle the focused window between tiled and floating.
     pub fn toggle_floating(state: &mut State) {
         let Some(id) = focused_id(state) else {
             return;
@@ -2567,7 +2565,7 @@ impl LayoutManager {
     }
 
     /// Make a tiled window floating at `rect` (start of an interactive move or
-    /// resize, `docs/plan.md` §9.5).
+    /// resize).
     pub fn float_window(state: &mut State, window: &Window, rect: Rectangle<i32, Logical>) {
         let Some(id) = state
             .core
@@ -2824,7 +2822,7 @@ impl LayoutManager {
         state.core.queue_redraw_all();
     }
 
-    /// Where a tiled window sits now, for cancelling a drag (`§9.5`).
+    /// Where a tiled window sits now, for cancelling a drag.
     pub fn tiled_slot(state: &State, window: &Window) -> Option<TiledSlot> {
         let managed = state.core.layout.by_window(window)?;
         if !managed.tiled {
@@ -2887,7 +2885,7 @@ impl LayoutManager {
         state.core.queue_redraw_all();
     }
 
-    /// Move a window's output association (cross-output drag, `§9.5`).
+    /// Move a window's output association (cross-output drag).
     pub fn assign_output(state: &mut State, window: &Window, output: smithay::output::Output) {
         let Some(id) = state
             .core
@@ -3541,7 +3539,7 @@ fn send_configure(
     let toplevel = managed.window.toplevel()?;
     let fullscreen = managed.fullscreen;
     // A window rule may ask this particular window for client-side
-    // decorations (`docs/plan.md` §10.2): then no tiled state, so the client
+    // decorations: then no tiled state, so the client
     // keeps its own titlebar and rounded corners.
     let no_csd = managed.visuals.no_csd;
 

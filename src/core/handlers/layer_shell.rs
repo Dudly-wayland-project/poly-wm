@@ -4,7 +4,7 @@
 //!
 //! Layer surfaces live in Smithay's per-output [`smithay::desktop::LayerMap`],
 //! which computes their geometry (anchors, size, exclusive zones) and hands
-//! the result to the renderer through `Space` (`docs/plan.md` §7, §10).
+//! the result to the renderer through `Space`.
 
 use smithay::desktop::{LayerSurface, layer_map_for_output};
 use smithay::output::Output;

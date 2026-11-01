@@ -1,6 +1,6 @@
 // Ported from niri (GPL-3.0-or-later): src/niri.rs (update_keyboard_focus)
 //
-//! The keyboard focus model (`docs/plan.md` §8).
+//! The keyboard focus model.
 //!
 //! Focus is not simply "who was clicked last": session-lock surfaces take
 //! everything, popup grabs keep their root focused, on-demand layer surfaces

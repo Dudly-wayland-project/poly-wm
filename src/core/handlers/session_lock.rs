@@ -1,7 +1,7 @@
 // Ported from niri (GPL-3.0-or-later): src/niri.rs (lock/unlock), src/handlers/mod.rs
 //
 //! ext-session-lock: while locked, only the lock client's surfaces are shown
-//! and only they receive input (`docs/plan.md` §7).
+//! and only they receive input.
 
 use std::mem;
 

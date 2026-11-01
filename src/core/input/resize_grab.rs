@@ -1,6 +1,6 @@
 // The resize state machine follows niri (GPL-3.0-or-later): src/input/resize_grab.rs
 // niri now keeps the rect math in its layout engine (`InteractiveResize`); Poly
-// has no layout engine yet (M3), so the rectangle lives here.
+// keeps the rectangle in this grab and only resizes floating windows.
 
 //! Interactive window resizing (`Mod+MouseRight`, or a client's CSD resize).
 //!
@@ -31,8 +31,7 @@ use crate::core::layout::LayoutManager;
 use crate::state::State;
 
 /// The smallest window a resize grab produces, unless the client asks for
-/// more (`docs/plan.md` §9.5: the layout owns tiled sizes in v1, so only
-/// floating windows get here).
+/// more. The layout owns tiled sizes, so only floating windows get here.
 const MIN_SIZE: i32 = 1;
 
 bitflags! {
@@ -151,7 +150,7 @@ impl ResizeGrab {
             return None;
         }
         // v1 resizes floating windows only: tiled geometry belongs to the Lua
-        // layout (`docs/plan.md` §9.5).
+        // layout.
         if tiled {
             return None;
         }

@@ -1,6 +1,6 @@
 // Ported from niri (GPL-3.0-or-later): src/handlers/mod.rs (InputMethodHandler)
 //
-//! Text input and input methods (`docs/plan.md` §7).
+//! Text input and input methods.
 //!
 //! Smithay does the heavy lifting: keyboard focus changes carry text-input
 //! enter/leave, and the input method's keyboard grab is routed through the

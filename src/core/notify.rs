@@ -1,4 +1,4 @@
-//! Desktop notifications for configuration problems (`docs/plan.md` §14).
+//! Desktop notifications for configuration problems.
 //!
 //! Errors are always drawn as Toasts on screen. `errors = { dbus = true }` also
 //! forwards them to the session's notification daemon

@@ -1,7 +1,7 @@
 // Ported from niri (GPL-3.0-or-later): src/utils/xwayland/mod.rs
 // Copyright (c) Ivan Molodetskikh and niri contributors.
 
-//! The X11 side of `xwayland-satellite` (`docs/plan.md` §13).
+//! The X11 side of `xwayland-satellite`.
 //!
 //! X11 clients find an X server through a socket named after a display number:
 //! `:0` is the abstract socket `/tmp/.X11-unix/X0` (Linux) plus the filesystem

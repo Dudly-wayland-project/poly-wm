@@ -1,4 +1,4 @@
-//! Per-session state for `ext-image-copy-capture-v1` (`docs/plan.md` §15, M8).
+//! Per-session state for `ext-image-copy-capture-v1`.
 //!
 //! A capture client that keeps a session open (screen recording, a mirror, a
 //! portal screencast) asks for one frame at a time, but the frames of a session
@@ -234,7 +234,7 @@ impl SessionCapture {
             // `Transform::Normal` for the same reason the frame is reported as
             // normal: the backend's own transform is not the client's business
             // (`handlers/image_copy_capture.rs`). Rotated outputs are not
-            // supported (`docs/plan.md` §15).
+            // supported.
             tracker: OutputDamageTracker::new(size, scale, Transform::Normal),
             texture,
             pending: HashMap::new(),

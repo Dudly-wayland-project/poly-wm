@@ -2,8 +2,8 @@
 //! hammers a running compositor with capture frames and reports what each frame
 //! costs.
 //!
-//! It exists to verify the two things the capture optimisations (see
-//! `docs/plan.md` §15 "M8 规格") have to get right, which `grim` cannot check:
+//! It exists to verify the two things the capture optimisations have to get
+//! right, which `grim` cannot check:
 //!
 //! 1. **Incremental damage is complete.** The client rotates several `wl_shm`
 //!    buffers like a real screencast client, accumulates the damage rectangles

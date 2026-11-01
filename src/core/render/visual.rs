@@ -131,7 +131,7 @@ pub struct BlurParams {
     pub noise: f32,
 }
 
-/// Everything visual about a window (`docs/plan.md` §10.2).
+/// Everything visual about a window.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowVisuals {
     /// Corner radius in logical pixels.
@@ -243,7 +243,7 @@ impl WindowVisuals {
         };
     }
 
-    /// The visuals of the same window drawn at `zoom` (`docs/plan.md` §9.7).
+    /// The visuals of the same window drawn at `zoom`.
     ///
     /// The overview rescales a whole workspace, so radius, border width, shadow
     /// blur and shadow offset have to shrink with it or the thumbnail would

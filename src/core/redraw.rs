@@ -130,8 +130,7 @@ impl State {
     /// Stat the shader files and expire Toasts (the 500 ms housekeeping timer).
     ///
     /// Recompiling needs the GL context, so this only sets the dirty flag and
-    /// queues a redraw; `Shaders::prepare` picks it up on the next frame
-    /// (`docs/plan.md` §10.3).
+    /// queues a redraw; `Shaders::prepare` picks it up on the next frame.
     pub fn poll_shader_files(&mut self) {
         if self.core.shaders.poll_files() {
             tracing::debug!("a shader file changed; recompiling on the next frame");
@@ -174,8 +173,7 @@ impl State {
         self.redraw_queued_outputs();
 
         // A shader reading `u_time` (or the cursor) depends on wall-clock time,
-        // so a frame is due again as soon as the last one finished
-        // (`docs/plan.md` §10.5).
+        // so a frame is due again as soon as the last one finished.
         if self.core.continuous_redraw {
             self.core.queue_redraw_all();
         }
