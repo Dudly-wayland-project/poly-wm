@@ -178,8 +178,7 @@ impl ImageCopyCaptureHandler for State {
         if let Some(output) = source_output(&session.source()) {
             let integer = output.current_scale().integer_scale();
             session.set_cursor_hotspot(crate::core::render::cursor_capture_hotspot(
-                &self.core,
-                integer,
+                &self.core, integer,
             ));
             announce_cursor_position(&session, &self.core, &output);
         }
@@ -217,10 +216,7 @@ impl ImageCopyCaptureHandler for State {
                 );
             }
             Err(err) => {
-                warn!(
-                    "error capturing the cursor of {}: {err}",
-                    output.name()
-                );
+                warn!("error capturing the cursor of {}: {err}", output.name());
                 frame.fail(CaptureFailureReason::Unknown);
             }
         }

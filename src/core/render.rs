@@ -1843,8 +1843,7 @@ pub fn capture_cursor(
         core.cursor_element
             .set_buffer(buffer_from_image(&image, integer.max(1)));
     }
-    core.cursor_element
-        .set_status(core.cursor_status.clone());
+    core.cursor_element.set_status(core.cursor_status.clone());
     let scale = Scale::from(scale.fractional_scale());
     let elements = core
         .cursor_element

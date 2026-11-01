@@ -50,12 +50,18 @@ impl BlurRequested {
         // A panic while holding this lock would only ever be a bug in this
         // module, and the flag is advisory: recover the guard instead of
         // poisoning every later frame (AGENTS.md §2.11).
-        let mut requested = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut requested = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         *requested = true;
     }
 
     fn get(&self) -> bool {
-        let requested = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let requested = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         return *requested;
     }
 }
