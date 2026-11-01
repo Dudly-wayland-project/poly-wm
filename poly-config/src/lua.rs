@@ -9,10 +9,15 @@
 //! }
 //! ```
 //!
-//! `poly.include("theme.lua")` evaluates another file — resolved relative to
+//! `poly.include("bindings.lua")` evaluates another file — resolved relative to
 //! the file that called it — and returns its value. Included files are tracked
 //! so the reload watcher (M6) knows what to watch. All problems are collected
 //! with field paths, and a runaway script is stopped by an instruction budget.
+//!
+//! A `theme.lua` next to the root file is not an include but an overlay: it is
+//! executed after the root file and merged over its table, so that a palette
+//! generator can recolour the compositor without editing the configuration
+//! (`docs/config.md`, "Theme layer").
 //!
 //! Lua state lives on the thread that loads the configuration and is never
 //! sent anywhere (`AGENTS.md` §2.5).
@@ -28,8 +33,9 @@ use poly_ipc::Action;
 use crate::binds::{Key, Keybind};
 use crate::config::{
     AccelProfile, AnimationCurve, AnimationOverride, Animations, Blur, Border, ClickMethod, Color,
-    Config, Device, Fullscreen, General, Input, Keyboard, LayerInteractivity, LayerRule, ModKey,
-    Overview, ResizePick, ScrollMethod, Shadow, StartupSpawn, TiledDrag, WindowDrag, Xwayland,
+    Config, Cursor, Device, Fullscreen, General, Input, Keyboard, LayerInteractivity, LayerRule,
+    ModKey, Overview, ResizePick, ScrollMethod, Shadow, StartupSpawn, TiledDrag, WindowDrag,
+    Xwayland,
 };
 use crate::error::{ConfigError, ConfigMessage, Errors, path_index, path_key};
 use crate::layout::{LayoutPrograms, parse_outputs, parse_window_rules};
@@ -81,6 +87,10 @@ pub struct ConfigLoadResult {
     /// The parsed configuration, or every problem found while loading it.
     pub config: Result<Config, ConfigError>,
     /// Every file the load touched, for the reload watcher (M6).
+    ///
+    /// This is what the watcher stats: the root file, everything
+    /// `poly.include` pulled in, and the theme layer even when it does not
+    /// exist yet, so that a theme written later is picked up.
     pub includes: Vec<PathBuf>,
     /// Non-fatal problems: unknown settings, a missing configuration file.
     pub warnings: Vec<ConfigMessage>,
@@ -227,8 +237,136 @@ fn load_inner(path: &Path, state: &Rc<State>, errors: &mut Errors) -> Result<Loa
     let Some(table) = value_table(value, state, errors) else {
         return Err(());
     };
+    let Some(table) = overlay_theme(&lua, state, table, &canonical, errors) else {
+        return Err(());
+    };
     let (config, layouts) = parse_config(&lua, &table, &canonical, errors);
     return Ok(Loaded { config, layouts });
+}
+
+/// The optional theme layer, next to the configuration it belongs to.
+///
+/// A theme is a decoration of the user configuration, not a second one: it is
+/// merged over the root table instead of replacing it, which is what makes
+/// `theme.lua` writable by something that does not understand the file it is
+/// decorating (a wallpaper-driven palette, `noctalia`).
+fn theme_path(config: &Path) -> Option<PathBuf> {
+    return config
+        .parent()
+        .map(|parent| return parent.join("theme.lua"));
+}
+
+/// Run `theme.lua`, when there is one, and merge it over `base`.
+///
+/// Returns `Some(base)` untouched when there is no theme, and `None` when the
+/// theme has problems: a broken theme rejects the whole load, exactly like a
+/// broken root file, so that what runs is never half of the configuration.
+fn overlay_theme(
+    lua: &Lua,
+    state: &Rc<State>,
+    base: Table,
+    root: &Path,
+    errors: &mut Errors,
+) -> Option<Table> {
+    let Some(path) = theme_path(root) else {
+        return Some(base);
+    };
+    if !path.is_file() {
+        // Watch where a theme would appear: one written while the compositor is
+        // running (a palette change) has to apply without touching the
+        // configuration, and the watcher reports a created file as a change.
+        state.includes.borrow_mut().push(path);
+        return Some(base);
+    }
+    let canonical = std::fs::canonicalize(&path).map_err(|err| {
+        errors.file(format!("cannot read the theme {}: {err}", path.display()));
+    });
+    let Ok(canonical) = canonical else {
+        return None;
+    };
+    // Loading a theme as the root file (nobody else there) must not merge the
+    // file into itself.
+    if canonical == root {
+        return Some(base);
+    }
+
+    state.stack.borrow_mut().push(canonical.clone());
+    let value = run_file(lua, state, &canonical);
+    state.stack.borrow_mut().pop();
+    let value = match value {
+        Ok(value) => value,
+        Err(err) => {
+            errors.file(lua_error_text(&err));
+            return None;
+        }
+    };
+    let theme = match value {
+        Value::Table(table) => table,
+        Value::Nil => {
+            errors.file(format!(
+                "the theme {} returned nothing: use `return {{ … }}`",
+                canonical.display()
+            ));
+            return None;
+        }
+        other => {
+            errors.file(format!(
+                "the theme {} must return a table, got {}",
+                canonical.display(),
+                lx::type_name(&other)
+            ));
+            return None;
+        }
+    };
+
+    return match merge_over(base, theme) {
+        Ok(merged) => Some(merged),
+        Err(err) => {
+            errors.file(format!("cannot apply the theme: {err}"));
+            None
+        }
+    };
+}
+
+/// Merge `theme` over `base`, table by table.
+///
+/// Maps merge key by key, so a theme that sets `general.border.active` keeps
+/// the border width the user configured. Sequences (key binds, window rules)
+/// are replaced wholesale: mixing two lists index by index would be surprising.
+fn merge_over(base: Table, theme: Table) -> mlua::Result<Table> {
+    for pair in theme.pairs::<Value, Value>() {
+        let (key, value) = pair?;
+        let existing = base.get::<Value>(key.clone())?;
+        match (existing, value) {
+            (Value::Table(mine), Value::Table(theirs))
+                if !is_sequence(&mine) && !is_sequence(&theirs) =>
+            {
+                merge_over(mine, theirs)?;
+            }
+            (_, value) => base.set(key, value)?,
+        }
+    }
+    return Ok(base);
+}
+
+/// Whether a table is a Lua array (`1 .. #table` and nothing else).
+fn is_sequence(table: &Table) -> bool {
+    let len = table.raw_len();
+    if len == 0 {
+        return false;
+    }
+    for pair in table.pairs::<Value, Value>() {
+        let Ok((key, _)) = pair else {
+            return false;
+        };
+        let Value::Integer(index) = key else {
+            return false;
+        };
+        if index < 1 || index as usize > len {
+            return false;
+        }
+    }
+    return true;
 }
 
 /// Create the Lua state: the `poly` helpers, the chunk runner and the
@@ -662,6 +800,7 @@ fn parse_general(table: &Table, root: &Path, errors: &mut Errors) -> General {
             "blur",
             "opacity",
             "window_shader",
+            "cursor",
         ],
         errors,
     );
@@ -709,7 +848,31 @@ fn parse_general(table: &Table, root: &Path, errors: &mut Errors) -> General {
     if let Some(value) = lx::string(table, "window_shader", "general", errors) {
         general.window_shader = Some(resolve_path(Some(root), &value).display().to_string());
     }
+    if let Some(t) = lx::table(table, "cursor", "general", errors) {
+        general.cursor = parse_cursor(&t, errors);
+    }
     return general;
+}
+
+/// Parse `general.cursor = { theme = …, size = … }`.
+fn parse_cursor(table: &Table, errors: &mut Errors) -> Cursor {
+    let mut cursor = Cursor::default();
+    lx::warn_unknown(table, "general.cursor", &["theme", "size"], errors);
+    if let Some(value) = lx::string(table, "theme", "general.cursor", errors) {
+        let value = value.trim();
+        if value.is_empty() {
+            errors.error(
+                path_key("general.cursor", "theme"),
+                "theme name must not be empty",
+            );
+        } else {
+            cursor.theme = Some(value.to_owned());
+        }
+    }
+    if let Some(value) = lx::integer(table, "size", "general.cursor", 1, 256, errors) {
+        cursor.size = Some(value as u32);
+    }
+    return cursor;
 }
 
 /// Parse `errors = { dbus = false }` (`docs/plan.md` §14).
@@ -2577,11 +2740,11 @@ mod tests {
         let root = dir.write(
             "config.lua",
             r#"
-            local theme = poly.include("theme.lua")
-            return { general = { gap = theme.gap } }
+            local bindings = poly.include("bindings.lua")
+            return { general = { gap = bindings.gap } }
             "#,
         );
-        let theme = dir.write("theme.lua", "return { gap = 21 }");
+        let theme = dir.write("bindings.lua", "return { gap = 21 }");
 
         let result = load_file(&root);
         let config = match &result.config {
@@ -2594,6 +2757,9 @@ mod tests {
             vec![
                 std::fs::canonicalize(&root).unwrap(),
                 std::fs::canonicalize(&theme).unwrap(),
+                // The theme layer is watched even though there is no
+                // `theme.lua`: the place it would appear in is enough.
+                dir.0.join("theme.lua"),
             ]
         );
     }
@@ -2686,7 +2852,7 @@ mod tests {
         let dir = TempDir::new("include-position");
         let root = dir.write(
             "config.lua",
-            "local theme = poly.include(\"theme.lua\")\nreturn { general = { gap = theme.gap } }",
+            "local bindings = poly.include(\"bindings.lua\")\nreturn { general = { gap = bindings.gap } }",
         );
         let result = load_file(&root);
         let err = match result.config {
@@ -2920,5 +3086,179 @@ mod tests {
                 refresh: Some(59_940),
             })
         );
+    }
+
+    #[test]
+    fn cursor_theme_and_size() {
+        // Unset means "ask the environment", which is `Cursor::theme_name`'s job.
+        let (config, _) = expect_config("cursor-default", "return {}");
+        assert_eq!(config.general.cursor, Cursor::default());
+
+        let (config, _) = expect_config(
+            "cursor-configured",
+            r#"
+            return { general = { cursor = { theme = "Adwaita", size = 32 } } }
+            "#,
+        );
+        assert_eq!(config.general.cursor.theme.as_deref(), Some("Adwaita"));
+        assert_eq!(config.general.cursor.size, Some(32));
+        assert_eq!(config.general.cursor.theme_name(), "Adwaita");
+        assert_eq!(config.general.cursor.size_px(), 32);
+    }
+
+    #[test]
+    fn cursor_rejects_out_of_range_values() {
+        let err = expect_errors(
+            "cursor-bad-size",
+            r#"return { general = { cursor = { size = 0 } } }"#,
+        );
+        let text = error_text(&err);
+        assert!(
+            text.contains("general.cursor.size: value must be between 1 and 256"),
+            "unexpected error: {text}"
+        );
+
+        let err = expect_errors(
+            "cursor-bad-theme",
+            r#"return { general = { cursor = { theme = "  " } } }"#,
+        );
+        let text = error_text(&err);
+        assert!(
+            text.contains("general.cursor.theme: theme name must not be empty"),
+            "unexpected error: {text}"
+        );
+
+        // Unknown keys are warnings, not errors, like everywhere else.
+        let (_, result) = expect_config(
+            "cursor-unknown-key",
+            r#"return { general = { cursor = { colour = "red" } } }"#,
+        );
+        assert_eq!(result.warnings.len(), 1);
+    }
+
+    /// Load a configuration that has a `theme.lua` next to it.
+    fn load_with_theme(name: &str, config: &str, theme: &str) -> ConfigLoadResult {
+        let dir = TempDir::new(name);
+        dir.write("theme.lua", theme);
+        let path = dir.write("config.lua", config);
+        return load_file(&path);
+    }
+
+    #[test]
+    fn a_theme_merges_over_the_configuration() {
+        let result = load_with_theme(
+            "theme-merge",
+            r##"
+            return {
+                general = { gap = 4, border = { width = 3, active = "#111111" } },
+                overview = { zoom = 0.25 },
+            }
+            "##,
+            r##"
+            return {
+                general = { border = { active = "#abcdef" } },
+                overview = { card_color = "#202020" },
+            }
+            "##,
+        );
+        let config = match &result.config {
+            Ok(config) => config,
+            Err(err) => panic!("config failed to load: {err}"),
+        };
+        // The theme wins where it speaks.
+        assert_eq!(config.general.border.active, Color::rgb(0xab, 0xcd, 0xef));
+        assert_eq!(config.overview.card_color, Color::rgb(0x20, 0x20, 0x20));
+        // …and leaves everything else alone, including siblings of the tables
+        // it does write.
+        assert_eq!(config.general.gap, 4);
+        assert_eq!(config.general.border.width, 3.0);
+        assert_eq!(config.overview.zoom, 0.25);
+        assert_eq!(config.general.border.inactive, Border::default().inactive);
+    }
+
+    #[test]
+    fn a_theme_replaces_sequences_and_merges_named_tables() {
+        let result = load_with_theme(
+            "theme-sequences",
+            r#"
+            return {
+                keybinds = { ["Mod+Q"] = "close-window", ["Mod+W"] = "close-window" },
+                spawn_at_startup = { { exec = { "keep-me" } } },
+            }
+            "#,
+            r#"
+            return {
+                keybinds = { ["Mod+X"] = "close-window" },
+                spawn_at_startup = { { exec = { "from-theme" } } },
+            }
+            "#,
+        );
+        let config = match &result.config {
+            Ok(config) => config,
+            Err(err) => panic!("config failed to load: {err}"),
+        };
+        // A list is replaced: index-wise mixing would be surprising.
+        assert_eq!(
+            config.spawn_at_startup,
+            vec![StartupSpawn::Exec(vec!["from-theme".to_owned()])]
+        );
+        // A table keyed by name is merged, so a theme can add a binding
+        // without dropping the user's.
+        assert_eq!(config.keybinds.len(), 3);
+    }
+    #[test]
+    fn a_broken_theme_rejects_the_load() {
+        let result = load_with_theme(
+            "theme-broken",
+            "return { general = { gap = 4 } }",
+            "return { general = ",
+        );
+        let err = match result.config {
+            Ok(_) => panic!("a broken theme must reject the configuration"),
+            Err(err) => err,
+        };
+        let text = error_text(&err);
+        assert!(text.contains("theme.lua"), "no theme in the error:\n{text}");
+    }
+
+    #[test]
+    fn a_theme_has_to_return_a_table() {
+        let result = load_with_theme(
+            "theme-not-a-table",
+            "return { general = { gap = 4 } }",
+            "return 42",
+        );
+        let err = match result.config {
+            Ok(_) => panic!("a non-table theme must reject the configuration"),
+            Err(err) => err,
+        };
+        let text = error_text(&err);
+        assert!(text.contains("must return a table"), "unexpected: {text}");
+    }
+
+    #[test]
+    fn the_theme_file_is_watched_even_when_it_does_not_exist() {
+        let dir = TempDir::new("theme-watch-missing");
+        let path = dir.write("config.lua", "return {}");
+        let result = load_file(&path);
+        assert!(result.config.is_ok());
+        // `noctalia` writes this file while poly runs; the reload watcher only
+        // notices it if the path is part of the include closure.
+        let watched = dir.0.join("theme.lua");
+        assert!(
+            result
+                .includes
+                .iter()
+                .any(|include| return include == &watched),
+            "theme.lua is not watched: {:?}",
+            result.includes
+        );
+
+        // And once it exists it is part of the closure because it was read.
+        dir.write("theme.lua", "return { general = { gap = 12 } }");
+        let result = load_file(&path);
+        let config = result.config.expect("config");
+        assert_eq!(config.general.gap, 12);
+        assert!(result.includes.contains(&watched));
     }
 }

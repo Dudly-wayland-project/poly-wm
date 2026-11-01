@@ -188,6 +188,8 @@ pub struct General {
     /// A GLSL fragment shader run for every window (`docs/plan.md` §10.4).
     /// `None` keeps the built-in shader.
     pub window_shader: Option<String>,
+    /// The software cursor the compositor draws.
+    pub cursor: Cursor,
 }
 
 impl Default for General {
@@ -202,7 +204,62 @@ impl Default for General {
             blur: Blur::default(),
             opacity: 1.0,
             window_shader: None,
+            cursor: Cursor::default(),
         };
+    }
+}
+
+/// `general.cursor = { … }`: the pointer the compositor draws.
+///
+/// Both fields fall back to the environment, which is where every other
+/// Wayland session keeps them: `theme` to `$XCURSOR_THEME` (`"default"` when
+/// that is unset too) and `size` to `$XCURSOR_SIZE` (`24`). A value in the
+/// configuration wins over the variable and is also pushed to clients, so
+/// toolkits and X11 applications that draw their own cursor agree with the
+/// compositor.
+///
+/// `size` is the nominal size in logical pixels; the icon is loaded at
+/// `size × output scale`, exactly like a themed cursor under
+/// `XCURSOR_SIZE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cursor {
+    /// Theme name, as found by the xcursor loader in its search path.
+    pub theme: Option<String>,
+    /// Nominal cursor size in logical pixels.
+    pub size: Option<u32>,
+}
+
+impl Default for Cursor {
+    fn default() -> Self {
+        return Self {
+            theme: None,
+            size: None,
+        };
+    }
+}
+
+impl Cursor {
+    /// The theme name to load, falling back to the environment and `default`.
+    pub fn theme_name(&self) -> String {
+        if let Some(theme) = &self.theme {
+            return theme.clone();
+        }
+        return std::env::var("XCURSOR_THEME").unwrap_or_else(|_| return "default".to_owned());
+    }
+
+    /// The nominal size to load, falling back to the environment and `24`.
+    ///
+    /// A size of zero would draw nothing, so the result is never smaller than
+    /// one pixel.
+    pub fn size_px(&self) -> u32 {
+        if let Some(size) = self.size {
+            return size.max(1);
+        }
+        return std::env::var("XCURSOR_SIZE")
+            .ok()
+            .and_then(|size| return size.parse().ok())
+            .unwrap_or(24u32)
+            .max(1);
     }
 }
 

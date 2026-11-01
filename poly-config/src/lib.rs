@@ -20,10 +20,10 @@ mod lua_ext;
 pub use binds::{Key, KeyParseError, Keybind, Modifiers, Trigger};
 pub use config::{
     AccelProfile, AnimationCurve, AnimationOverride, AnimationSpec, Animations, Blur, BlurShader,
-    Border, ClickMethod, Color, Config, Device, Errors, Fullscreen, General, Input, Keyboard,
-    LayerInteractivity, LayerRule, LayoutInfo, LayoutOptionValue, ModKey, OutputConfig, OutputMode,
-    OutputPosition, OutputScale, OutputTransform, ResizePick, ScrollMethod, Shadow, StartupSpawn,
-    TiledDrag, WindowDrag, WindowRule, Xwayland, resolved_output,
+    Border, ClickMethod, Color, Config, Cursor, Device, Errors, Fullscreen, General, Input,
+    Keyboard, LayerInteractivity, LayerRule, LayoutInfo, LayoutOptionValue, ModKey, OutputConfig,
+    OutputMode, OutputPosition, OutputScale, OutputTransform, ResizePick, ScrollMethod, Shadow,
+    StartupSpawn, TiledDrag, WindowDrag, WindowRule, Xwayland, resolved_output,
 };
 pub use default_config::{DEFAULT_CONFIG, write_default};
 pub use error::{ConfigError, ConfigMessage, LocateError};

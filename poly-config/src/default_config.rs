@@ -20,9 +20,12 @@ use crate::locate::ConfigSource;
 pub const DEFAULT_CONFIG: &str = r##"-- Poly configuration (`docs/config.md` for every setting).
 --
 -- The file is Lua: it is executed, and its return value is the configuration.
--- `poly.setup{ … }` works as well. `poly.include("theme.lua")` runs another
+-- `poly.setup{ … }` works as well. `poly.include("bindings.lua")` runs another
 -- file and returns its value, which is how a big configuration stays readable;
 -- included files are reloaded too when they change.
+--
+-- A `theme.lua` next to this file is merged over it when it exists, which is
+-- where a palette generator writes its colours; it needs no change here.
 --
 -- Saving this file applies it immediately, with no restart. A broken edit keeps
 -- the previous configuration running and shows the problem in a Toast.
@@ -44,6 +47,8 @@ return {
       duration = 180,             -- milliseconds
       window_close = { duration = 180 },
     },
+    -- The pointer Poly draws. Unset follows `$XCURSOR_THEME`/`$XCURSOR_SIZE`.
+    -- cursor = { theme = "Adwaita", size = 24 },
   },
 
   -- Input devices. Entries match by glob, first match wins.

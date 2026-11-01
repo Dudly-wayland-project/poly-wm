@@ -176,6 +176,7 @@ pub fn apply_config(
     }
 
     apply_keyboard(state);
+    apply_cursor(state);
     crate::core::layout::LayoutManager::relayout(state);
     // `outputs` is a full re-apply: `reload-config` is how runtime changes made
     // with `poly msg output` are put back to the file's values (`docs/plan.md`
@@ -196,9 +197,39 @@ pub fn apply_config(
 /// plan.md` §11: no mutation of our own environment, which is unsound once
 /// threads exist).
 pub fn apply_child_environment(config: &Config) {
+    // The pointer first, so an explicit `environment` entry still wins over it.
+    apply_cursor_environment(&config.general.cursor);
     for (name, value) in &config.environment {
         spawn::set_child_env(name, value);
     }
+}
+
+/// Export the configured pointer to clients.
+///
+/// Toolkits and X11 applications draw their own pointer and read these two
+/// variables. Without this, a cursor picked in the configuration would give the
+/// desktop a themed pointer and every client something else. Unset means "do
+/// not override", so a value in the session environment keeps working.
+fn apply_cursor_environment(cursor: &poly_config::Cursor) {
+    spawn::set_child_env_opt("XCURSOR_THEME", cursor.theme.as_deref());
+    let size = cursor.size.map(|size| return size.to_string());
+    spawn::set_child_env_opt("XCURSOR_SIZE", size.as_deref());
+}
+
+/// Apply `general.cursor` to the live pointer.
+///
+/// The icons are only reloaded when the theme or the size actually changed: a
+/// reload that leaves the cursor alone must not restart its animation.
+fn apply_cursor(state: &mut State) {
+    let settings = state.core.config.general.cursor.clone();
+    if state.core.cursor.matches(&settings) {
+        return;
+    }
+    state.core.cursor = crate::core::cursor::Cursor::load(&settings);
+    // Screenshot and screen-share clients were told the old size; the new one
+    // is re-sent with the next frame's constraints.
+    crate::core::handlers::refresh_cursor_sessions(&state.core);
+    state.core.queue_redraw_all();
 }
 
 /// Apply `input.keyboard` to the live keyboard: keymap and repeat settings.

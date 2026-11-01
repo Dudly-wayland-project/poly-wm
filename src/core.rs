@@ -621,6 +621,11 @@ impl Core {
                 return anyhow::anyhow!("error arming the housekeeping timer: {err:?}");
             })?;
 
+        // The pointer theme comes from the configuration, which was moved into
+        // `Self` below; loading it first keeps `Cursor::load` free of the
+        // partially built state.
+        let cursor = Cursor::load(&config.general.cursor);
+
         return Ok(Self {
             display_handle,
             stop_signal: event_loop.get_signal(),
@@ -644,7 +649,7 @@ impl Core {
             ipc: crate::core::ipc::IpcServer::default(),
             scroll_tracker_horizontal: ScrollTracker::new(120),
             scroll_tracker_vertical: ScrollTracker::new(120),
-            cursor: Cursor::load(),
+            cursor,
             cursor_status: CursorImageStatus::default_named(),
             cursor_element: CursorElement::default(),
             pointer_images: Vec::new(),

@@ -6,6 +6,7 @@
 use std::io::Read;
 use std::time::Duration;
 
+use poly_config::Cursor as CursorSettings;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::memory::{
     MemoryRenderBuffer, MemoryRenderBufferRenderElement,
@@ -24,25 +25,41 @@ static FALLBACK_CURSOR_DATA: &[u8] = include_bytes!("../../resources/cursor.rgba
 /// A loaded xcursor theme.
 pub struct Cursor {
     icons: Vec<Image>,
+    /// Theme name the icons came from, for change detection on reload.
+    theme: String,
+    /// Nominal size in logical pixels, before the output scale.
     size: u32,
 }
 
 impl Cursor {
-    /// Load `$XCURSOR_THEME` (falling back to the built-in cursor).
-    pub fn load() -> Cursor {
-        let name = std::env::var("XCURSOR_THEME").unwrap_or_else(|_| return "default".to_owned());
-        let size = std::env::var("XCURSOR_SIZE")
-            .ok()
-            .and_then(|size| return size.parse().ok())
-            .unwrap_or(24);
+    /// Load the theme named by `general.cursor`.
+    ///
+    /// The configuration wins over the environment, and falls back to it when
+    /// it says nothing: `$XCURSOR_THEME` (`"default"` when unset) and
+    /// `$XCURSOR_SIZE` (`24`).
+    pub fn load(settings: &CursorSettings) -> Cursor {
+        let name = settings.theme_name();
+        let size = settings.size_px();
 
         let theme = CursorTheme::load(&name);
         let icons = load_icon(&theme).unwrap_or_else(|err| {
-            warn!("unable to load xcursor theme: {err:?}, using fallback cursor");
+            warn!("unable to load xcursor theme {name:?}: {err:?}, using fallback cursor");
             return vec![fallback_image()];
         });
 
-        return Cursor { icons, size };
+        return Cursor {
+            icons,
+            theme: name,
+            size,
+        };
+    }
+
+    /// Whether this cursor is already the one `settings` asks for.
+    ///
+    /// A reload that does not change the cursor keeps the loaded icons, which
+    /// also keeps the animation frame it is on.
+    pub fn matches(&self, settings: &CursorSettings) -> bool {
+        return self.theme == settings.theme_name() && self.size == settings.size_px();
     }
 
     /// Grab the frame of the cursor animation to draw at `time`.

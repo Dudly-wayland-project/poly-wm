@@ -74,6 +74,23 @@ pub fn set_child_env(key: &str, value: &str) {
     env.push((key.to_owned(), value.to_owned()));
 }
 
+/// Set an environment variable, or stop overriding it when `value` is `None`.
+///
+/// `None` means "let the child inherit whatever we have", which is what an
+/// unset configuration option should do: a value the user exported in their
+/// session keeps working.
+pub fn set_child_env_opt(key: &str, value: Option<&str>) {
+    let Some(value) = value else {
+        let mut env = match CHILD_ENV.write() {
+            Ok(env) => env,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        env.retain(|(k, _)| return k != key);
+        return;
+    };
+    set_child_env(key, value);
+}
+
 /// The value a child would get for `key`, if one is set.
 ///
 /// Used by the XWayland satellite, which is spawned with `Command` of its own

@@ -42,6 +42,38 @@ The root file and every file loaded with `poly.include` are watched. Saving any
 of them reloads the configuration immediately. A broken edit never takes down
 the running session.
 
+## Theme layer
+
+A `theme.lua` next to the configuration file is merged over it when it exists.
+That is how a palette generator recolours Poly without having to understand the
+configuration: it owns one small file, and the user's `config.lua` stays
+untouched. The theme is ordinary Lua with the same helpers and the same
+instruction budget, and it must return a table:
+
+```lua
+-- ~/.config/poly/theme.lua
+return {
+    general = {
+        border = { active = "#8ab4f8", inactive = "#3c4043" },
+    },
+    overview = {
+        card_color = "#202124",
+    },
+}
+```
+
+Tables are merged key by key, so the theme above changes the border colours and
+keeps the width and radius the user configured. Lists (`window_rules`,
+`layer_rules`, `spawn_at_startup`) are replaced wholesale instead of being mixed
+entry by entry; tables keyed by name, such as `keybinds` and `outputs`, merge
+like any other table. A theme with a syntax error rejects the whole
+configuration and leaves the previous one running, exactly like a broken root
+file.
+
+`theme.lua` is watched even when it does not exist yet, so writing it while Poly
+runs applies the theme within half a second. Deleting the file returns the
+compositor to the colours in `config.lua`.
+
 ## Lua environment
 
 The following helpers are available while the configuration is evaluated:
@@ -65,7 +97,7 @@ file share the same budget.
 
 | Key | Type | Purpose |
 | --- | --- | --- |
-| `general` | table | Gaps, decorations, animations, opacity and shaders. |
+| `general` | table | Gaps, decorations, animations, opacity, shaders and the pointer. |
 | `input` | table | Keyboard layout and libinput device settings. |
 | `keybinds` | table | Bindings from key, mouse button or scroll trigger to actions. |
 | `window_drag` | table | Interactive move and resize behaviour. |
@@ -94,6 +126,7 @@ general = {
     border = { ... },
     shadow = { ... },
     blur = { ... },
+    cursor = { ... },
 }
 ```
 
@@ -236,6 +269,31 @@ cannot end up with a blurred screen. `enable` still has to be on, and
 Shader keys are `down` (downsample), `up` (upsample) and `finish` (final pass).
 A shader that fails to compile keeps the previous program and reports the error
 on screen.
+
+### `general.cursor`
+
+```lua
+cursor = {
+    theme = "Adwaita",
+    size = 32,
+}
+```
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `theme` | `$XCURSOR_THEME`, else `default` | xcursor theme name, looked up in the usual cursor directories (`$XDG_DATA_HOME/icons`, `~/.icons`, `/usr/share/icons`). |
+| `size` | `$XCURSOR_SIZE`, else `24` | Nominal pointer size in logical pixels. Range: 1-256. |
+
+Poly draws the pointer itself, so `size` is what ends up on screen: the icon is
+picked out of the theme at `size × output scale`, which is how the same number
+behaves under `XCURSOR_SIZE` everywhere else. Leaving a field unset keeps
+following the environment variable.
+
+Both values are also exported as `XCURSOR_THEME` and `XCURSOR_SIZE` to spawned
+children, so toolkits and X11 applications that draw their own pointer agree
+with the compositor; an explicit entry in `environment` still wins over them.
+Editing either setting applies on the next reload — the pointer is reloaded but
+not restarted, so an animation keeps its frame when the setting did not change.
 
 ### Colours
 
