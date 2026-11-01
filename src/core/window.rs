@@ -249,7 +249,13 @@ fn create_foreign_toplevel(state: &mut State, window: &Window, root: &WlSurface,
             identity.app_id.unwrap_or_default(),
             id.to_string(),
         );
-    state.core.foreign_toplevels.insert(root.clone(), handle);
+    // A window that unmapped and mapped again gets a new id, so the entry from
+    // its previous mapping has to be closed here; otherwise a taskbar shows the
+    // same window twice and keeps the older entry forever.
+    let previous = state.core.foreign_toplevels.insert(root.clone(), handle);
+    if let Some(previous) = previous {
+        previous.send_closed();
+    }
 }
 
 /// Update the taskbar entry after the client changed its title or app id.
@@ -292,8 +298,15 @@ pub fn on_window_destroyed(state: &mut State, root: &WlSurface) {
     // A window that never mapped is simply forgotten.
     state.core.unmapped_windows.remove(root);
 
-    // Taskbars must not keep an entry for a window that is gone.
-    state.core.foreign_toplevels.remove(root);
+    // Taskbars must not keep an entry for a window that is gone. Dropping the
+    // handle is not enough: every `ExtForeignToplevelHandleV1` resource keeps a
+    // strong clone in its user data, so the last reference goes away with the
+    // client, not with the window, and `closed` would only be sent on
+    // disconnect. Say it explicitly, or a taskbar keeps showing the app as
+    // running after its last window closed.
+    if let Some(handle) = state.core.foreign_toplevels.remove(root) {
+        handle.send_closed();
+    }
 
     // The keyboard may be pointing at the window that just died.
     let held_focus = keyboard_focused_on(state, root);
