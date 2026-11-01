@@ -1,13 +1,14 @@
 // The resize state machine follows niri (GPL-3.0-or-later): src/input/resize_grab.rs
-// niri now keeps the rect math in its layout engine (`InteractiveResize`); Poly
-// keeps the rectangle in this grab and only resizes floating windows.
+// niri keeps the rect math in its layout engine (`InteractiveResize`); Poly
+// keeps the rectangle in this grab but stores the resize state in the layout.
 
 //! Interactive window resizing (`Mod+MouseRight`, or a client's CSD resize).
 //!
 //! The grab remembers the rectangle the window had when the drag started and
 //! applies `original + delta` every frame: the pointer never chases a moving
-//! edge, so a resize cannot drift. The client learns the new size through a
-//! configure; the on-screen rectangle follows once it commits.
+//! edge, so a resize cannot drift. The layout throttles the configures it sends
+//! (one per client commit) and draws the size the client acknowledged; see
+//! `LayoutManager::begin_resize`.
 
 use bitflags::bitflags;
 use smithay::desktop::Window;
@@ -27,7 +28,7 @@ use tracing::trace;
 
 use poly_config::ResizePick;
 
-use crate::core::layout::LayoutManager;
+use crate::core::layout::{LayoutManager, ResizeAnchor};
 use crate::state::State;
 
 /// The smallest window a resize grab produces, unless the client asks for
@@ -220,6 +221,15 @@ impl ResizeGrab {
                 return;
             }
             self.started = true;
+            // The layout anchors the rectangle on the edges the pointer does
+            // not move: dragging the left edge keeps the right one fixed.
+            let anchor = ResizeAnchor {
+                fixed_right: self.edges.contains(ResizeEdges::LEFT),
+                fixed_bottom: self.edges.contains(ResizeEdges::TOP),
+            };
+            if !LayoutManager::begin_resize(state, &self.window, self.original_rect, anchor) {
+                return;
+            }
         }
 
         let rect = self.new_rect(state);
@@ -232,14 +242,13 @@ impl ResizeGrab {
 
         // The window's committed geometry may still be the old one, but the
         // client is on its way; repaint so the pending size shows up as soon as
-        // it commits (`on_root_commit` queues a redraw too).
+        // it commits (`on_window_commit` queues a redraw too).
         state.core.queue_redraw_all();
     }
 
     /// Put the window back to its original rectangle (Escape).
     fn restore(&mut self, state: &mut State) {
-        LayoutManager::resize_floating(state, &self.window, self.original_rect);
-        state.core.queue_redraw_all();
+        LayoutManager::cancel_resize(state, &self.window, self.original_rect);
     }
 }
 
@@ -371,6 +380,8 @@ impl PointerGrab<State> for ResizeGrab {
     fn unset(&mut self, data: &mut State) {
         if std::mem::take(&mut data.core.grab_cancelled) {
             self.restore(data);
+        } else if self.started {
+            LayoutManager::end_resize(data, &self.window);
         }
         data.core.cursor_status = CursorImageStatus::default_named();
         data.core.queue_redraw_all();

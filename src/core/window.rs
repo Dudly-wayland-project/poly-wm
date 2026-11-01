@@ -113,6 +113,7 @@ pub fn on_root_commit(state: &mut State, root: &WlSurface) {
     };
 
     window.on_commit();
+    LayoutManager::on_window_commit(state, &window);
 
     // A commit with a null buffer unmaps the window.
     if !is_mapped(root) {

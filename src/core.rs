@@ -110,8 +110,11 @@ pub struct Core {
     pub display_handle: DisplayHandle,
     /// Stopping this signal makes the event loop return.
     pub stop_signal: LoopSignal,
-    /// Start of the compositor process, used as the frame callback clock.
+    /// Start of the compositor process, used as the shader/cursor clock.
     pub start_time: Instant,
+    /// `CLOCK_MONOTONIC` at [`Core::start_time`], so protocol timestamps
+    /// (frame callbacks, presentation) can be reported on the correct epoch.
+    pub monotonic_start: Duration,
 
     /// Every mapped window.
     pub space: Space<Window>,
@@ -625,10 +628,18 @@ impl Core {
         // partially built state.
         let cursor = Cursor::load(&config.general.cursor);
 
+        // Both readings are taken back to back so a `CLOCK_MONOTONIC` timestamp
+        // can be mapped onto the `Instant` timeline without a visible offset.
+        let monotonic_start: Duration = smithay::utils::Clock::<smithay::utils::Monotonic>::new()
+            .now()
+            .into();
+        let start_time = Instant::now();
+
         return Ok(Self {
             display_handle,
             stop_signal: event_loop.get_signal(),
-            start_time: Instant::now(),
+            start_time,
+            monotonic_start,
             space: Space::default(),
             popups: PopupManager::default(),
             output_state: HashMap::new(),
@@ -900,6 +911,42 @@ impl Core {
     /// Per-output state, created on first use.
     pub fn output_state(&mut self, output: &Output) -> &mut OutputState {
         return self.output_state.entry(output.clone()).or_default();
+    }
+
+    /// The `CLOCK_MONOTONIC` reading now.
+    ///
+    /// `wl_surface.frame` callbacks, `wp_presentation` and the screencopy /
+    /// image-copy timestamps are specified on that clock, not since compositor
+    /// start.
+    pub fn monotonic_now(&self) -> Duration {
+        return self.monotonic_start + self.start_time.elapsed();
+    }
+
+    /// Map a `CLOCK_MONOTONIC` timestamp onto this process's [`Instant`] timeline.
+    pub fn instant_at_monotonic(&self, time: Duration) -> Instant {
+        return self.start_time + time.saturating_sub(self.monotonic_start);
+    }
+
+    /// Freeze the animation clock for the frame `output` is about to draw.
+    ///
+    /// The returned time is the VBlank the frame is expected to land on. Every
+    /// animation sampled during this render uses it, so consecutive frames step
+    /// by exactly one refresh interval even when the event loop is late.
+    pub fn begin_frame(&mut self, output: &Output) -> Instant {
+        let interval = crate::core::redraw::frame_interval(output);
+        let now = Instant::now();
+        let clock = &mut self.output_state(output).frame_clock;
+        clock.set_refresh_interval(Some(interval));
+        return clock.next_presentation_time(now);
+    }
+
+    /// Record the presentation of a frame on `output`.
+    ///
+    /// udev passes the DRM VBlank timestamp; winit and headless pass the host
+    /// frame boundary. The frame clock snaps the next animation sample to the
+    /// grid this establishes.
+    pub fn frame_presented(&mut self, output: &Output, time: Instant) {
+        self.output_state(output).frame_clock.presented(time);
     }
 
     /// The `outputs.<name>.background` colour of `output`, if the file sets one.

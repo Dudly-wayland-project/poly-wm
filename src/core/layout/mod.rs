@@ -15,7 +15,7 @@
 mod transaction;
 
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use poly_config::{
     AnimationSpec, Animations, Config, LayoutContext, LayoutEffects, LayoutOutput, LayoutPrograms,
@@ -84,6 +84,10 @@ pub struct ManagedWindow {
     open_animation: Option<OpenAnimation>,
     /// A configure this window has not acknowledged yet.
     pending: Option<WindowPending>,
+    /// The interactive resize of this window, if one is running (the pointer
+    /// grab only produces rectangles; the state lives here, like niri's
+    /// `InteractiveResize`).
+    resize: Option<InteractiveResize>,
     /// Resolved visual settings: radius, opacity, border, shadow, blur and the
     /// window shader.
     pub visuals: crate::core::render::visual::WindowVisuals,
@@ -92,6 +96,115 @@ pub struct ManagedWindow {
 struct WindowPending {
     serial: Serial,
     transaction: Transaction,
+}
+
+/// Which edges of a window stay on screen while the pointer drags the others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResizeAnchor {
+    /// The right edge is anchored, the left edge follows the pointer.
+    pub fixed_right: bool,
+    /// The bottom edge is anchored, the top edge follows the pointer.
+    pub fixed_bottom: bool,
+}
+
+/// One interactive resize, from the first pointer motion past the threshold
+/// until the client committed the final size.
+///
+/// A resize is not a layout animation: the compositor asks for a new size at
+/// most once per client commit and draws whatever the client currently has,
+/// anchored on the edges the pointer does not move. Sending a configure for
+/// every pointer frame makes clients fall further and further behind (a 1000 Hz
+/// mouse sends ~1000 size requests per second); drawing the committed size
+/// instead of stretching the old buffer to the requested one is what keeps the
+/// window sharp while it grows.
+struct InteractiveResize {
+    /// Which edges stay put.
+    anchor: ResizeAnchor,
+    /// The corner that stays on screen: the anchored `x`/`y`.
+    origin: Point<i32, Logical>,
+    /// The size the pointer asks for.
+    desired: Size<i32, Logical>,
+    /// The size the client drew last.
+    committed: Size<i32, Logical>,
+    /// The size in the last configure this resize sent.
+    sent: Option<Size<i32, Logical>>,
+    /// The grab ended; the final configure is on its way and `Resizing` is
+    /// cleared on the next commit (or after [`RESIZE_END_TIMEOUT`]).
+    end_since: Option<Instant>,
+}
+
+impl InteractiveResize {
+    /// The requested size, at least one pixel per axis.
+    fn size(&self) -> Size<i32, Logical> {
+        return Size::from((self.desired.w.max(1), self.desired.h.max(1)));
+    }
+
+    /// Whether a new size configure may go out now (niri's `CanSend`).
+    ///
+    /// Only size changes are throttled: while the client still draws a size
+    /// other than the one the previous configure asked for, another configure
+    /// would only queue work it cannot keep up with.
+    fn caught_up(&self) -> bool {
+        return self.sent.is_none_or(|sent| return self.committed == sent);
+    }
+
+    /// The rectangle `size` occupies with the anchored edges fixed.
+    fn rect_for(&self, size: Size<i32, Logical>) -> Rectangle<i32, Logical> {
+        let x = if self.anchor.fixed_right {
+            self.origin.x - size.w
+        } else {
+            self.origin.x
+        };
+        let y = if self.anchor.fixed_bottom {
+            self.origin.y - size.h
+        } else {
+            self.origin.y
+        };
+        return Rectangle::new(Point::from((x, y)), size);
+    }
+}
+
+/// How long an ended resize waits for the last commit before it clears
+/// `Resizing` anyway. A client that never commits the final size (it started a
+/// nested event loop, say) must not keep the state forever.
+const RESIZE_END_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// The size the client has acknowledged last.
+///
+/// The acked configure state (not the surface geometry) is what the throttle
+/// compares against: for a `no_csd` window with server-side decorations the
+/// geometry matches the configure, but a client that sets a window geometry
+/// inset by its own shadows would otherwise never look "caught up".
+fn committed_size(window: &Window) -> Size<i32, Logical> {
+    let acked = window.toplevel().and_then(|toplevel| {
+        return toplevel.with_cached_state(|state| {
+            return state
+                .last_acked
+                .as_ref()
+                .map(|configure| return configure.state.size);
+        });
+    });
+    let size = acked
+        .flatten()
+        .unwrap_or_else(|| return window.geometry().size);
+    return Size::from((size.w.max(1), size.h.max(1)));
+}
+
+/// Ask the client for `size`; `resizing` also sets or clears the protocol state
+/// that tells it the compositor is dragging an edge.
+fn send_resize_configure(managed: &mut ManagedWindow, size: Size<i32, Logical>, resizing: bool) {
+    let Some(toplevel) = managed.window.toplevel() else {
+        return;
+    };
+    toplevel.with_pending_state(|pending| {
+        pending.size = Some(size);
+        if resizing {
+            pending.states.set(ToplevelState::Resizing);
+        } else {
+            pending.states.unset(ToplevelState::Resizing);
+        }
+    });
+    toplevel.send_pending_configure();
 }
 
 /// The niri-style opening animation: fade in while scaling up from 50%.
@@ -1099,6 +1212,7 @@ impl LayoutManager {
             drop_preview: None,
             open_animation,
             pending: None,
+            resize: None,
             visuals: crate::core::render::visual::WindowVisuals::resolve(
                 &state.core.config,
                 app_id,
@@ -2411,6 +2525,29 @@ impl LayoutManager {
             }
         }
         notify_released_transactions(state);
+        // A resize that ended but whose client never commits the final size
+        // (it entered a nested event loop, say) must not keep drawing at the
+        // old committed size forever. The layout target already is the last
+        // requested rectangle, so dropping the state snaps to it.
+        let timed_out = state
+            .core
+            .layout
+            .windows
+            .iter()
+            .filter_map(|(id, managed)| {
+                let since = managed.resize.as_ref()?.end_since?;
+                return (now.saturating_duration_since(since) >= RESIZE_END_TIMEOUT).then_some(*id);
+            })
+            .collect::<Vec<_>>();
+        if !timed_out.is_empty() {
+            for id in timed_out {
+                if let Some(managed) = state.core.layout.windows.get_mut(&id) {
+                    managed.resize = None;
+                }
+            }
+            state.core.layout.dirty_space = true;
+            state.core.queue_redraw_all();
+        }
         let completed = state
             .core
             .layout
@@ -2790,7 +2927,67 @@ impl LayoutManager {
         return managed.drag_rect.is_some();
     }
 
+    /// Begin an interactive resize of a floating window.
+    ///
+    /// `rect` is the window's rectangle when the drag started and `anchor`
+    /// names the edges that stay on screen. The first configure announces
+    /// `Resizing`, so the client can switch to its cheap resize path right
+    /// away, and carries the first new size.
+    pub fn begin_resize(
+        state: &mut State,
+        window: &Window,
+        rect: Rectangle<i32, Logical>,
+        anchor: ResizeAnchor,
+    ) -> bool {
+        let Some(id) = state
+            .core
+            .layout
+            .by_window(window)
+            .map(|managed| return managed.id)
+        else {
+            return false;
+        };
+        let Some(managed) = state.core.layout.windows.get_mut(&id) else {
+            return false;
+        };
+        if managed.fullscreen.is_some() || managed.tiled || managed.drag_rect.is_some() {
+            return false;
+        }
+        let origin = Point::from((
+            if anchor.fixed_right {
+                rect.loc.x + rect.size.w
+            } else {
+                rect.loc.x
+            },
+            if anchor.fixed_bottom {
+                rect.loc.y + rect.size.h
+            } else {
+                rect.loc.y
+            },
+        ));
+        managed.resize = Some(InteractiveResize {
+            anchor,
+            origin,
+            desired: rect.size,
+            committed: committed_size(&managed.window),
+            sent: None,
+            end_since: None,
+        });
+        managed.animation = None;
+        if let Some(pending) = &mut state.core.layout.pending {
+            pending.targets.remove(&id);
+        }
+        Self::drive_resize(state, id, true);
+        return true;
+    }
+
     /// Apply a resize request to a floating window.
+    ///
+    /// Called once per pointer frame. The size is only recorded; a configure
+    /// goes out when the client acknowledged the previous one (see
+    /// [`InteractiveResize::caught_up`]) or when the grab asks for the last
+    /// one. Without that throttle a 1000 Hz mouse produces one configure per
+    /// pointer frame and the client can never catch up.
     pub fn resize_floating(state: &mut State, window: &Window, rect: Rectangle<i32, Logical>) {
         let Some(id) = state
             .core
@@ -2800,24 +2997,164 @@ impl LayoutManager {
         else {
             return;
         };
-        let Some(managed) = state.core.layout.windows.get_mut(&id) else {
-            return;
+        let resizing = {
+            let Some(managed) = state.core.layout.windows.get_mut(&id) else {
+                return;
+            };
+            if managed.fullscreen.is_some() {
+                return;
+            }
+            match &mut managed.resize {
+                Some(resize) => {
+                    if resize.end_since.is_some() {
+                        return;
+                    }
+                    resize.desired = rect.size;
+                    true
+                }
+                None => {
+                    // No grab started one (an internal caller): apply it directly.
+                    managed.floating_rect = rect;
+                    managed.target_rect = rect;
+                    managed.animation = None;
+                    false
+                }
+            }
         };
-        if managed.fullscreen.is_some() {
+        if !resizing {
+            state.core.layout.dirty_space = true;
+            state.core.queue_redraw_all();
             return;
         }
-        managed.floating_rect = rect;
-        managed.target_rect = rect;
-        managed.animation = None;
+        Self::drive_resize(state, id, false);
+    }
+
+    /// Finish an interactive resize: the last size is always sent, and that
+    /// configure clears `Resizing`.
+    pub fn end_resize(state: &mut State, window: &Window) {
+        let Some(id) = state
+            .core
+            .layout
+            .by_window(window)
+            .map(|managed| return managed.id)
+        else {
+            return;
+        };
+        {
+            let Some(managed) = state.core.layout.windows.get_mut(&id) else {
+                return;
+            };
+            let Some(resize) = &mut managed.resize else {
+                return;
+            };
+            if resize.end_since.is_none() {
+                resize.end_since = Some(Instant::now());
+            }
+        }
+        // The final configure is allowed to overtake the throttle: it is the
+        // size the user chose, sent exactly once, and it is also the configure
+        // that clears `Resizing`.
+        Self::drive_resize(state, id, true);
+    }
+
+    /// Abort an interactive resize and put `window` back at `rect` (Escape).
+    pub fn cancel_resize(state: &mut State, window: &Window, rect: Rectangle<i32, Logical>) {
+        let Some(id) = state
+            .core
+            .layout
+            .by_window(window)
+            .map(|managed| return managed.id)
+        else {
+            return;
+        };
+        {
+            let Some(managed) = state.core.layout.windows.get_mut(&id) else {
+                return;
+            };
+            managed.resize = None;
+            managed.floating_rect = rect;
+            managed.target_rect = rect;
+            managed.animation = None;
+            // The clear of `Resizing` is part of the configure, even when the
+            // size itself did not change.
+            send_resize_configure(managed, rect.size, false);
+        }
+        state.core.layout.dirty_space = true;
+        state.core.queue_redraw_all();
+    }
+
+    /// The window committed; the client may just have acknowledged a resize
+    /// configure. Send the next size if it caught up, or release the resize
+    /// state once the final size is on screen.
+    pub fn on_window_commit(state: &mut State, window: &Window) {
+        let Some(id) = state
+            .core
+            .layout
+            .by_window(window)
+            .map(|managed| return managed.id)
+        else {
+            return;
+        };
+        let active = state
+            .core
+            .layout
+            .windows
+            .get(&id)
+            .is_some_and(|managed| return managed.resize.is_some());
+        if !active {
+            return;
+        }
+        Self::drive_resize(state, id, false);
+    }
+
+    /// Send the resize configure if the client caught up, or when `force`d.
+    fn drive_resize(state: &mut State, id: u64, force: bool) {
+        // Clients that batch size changes handle the throttle fine; the switch
+        // exists for clients that do not (niri: `disable_resize_throttling`).
+        let throttle = state.core.config.window_drag.throttle_resize;
+        let mut configure = None;
+        let mut finished = false;
+        {
+            let Some(managed) = state.core.layout.windows.get_mut(&id) else {
+                return;
+            };
+            let Some(resize) = &mut managed.resize else {
+                return;
+            };
+            // The client acks a configure on its next commit; that ack is the
+            // only signal that the previous request landed.
+            resize.committed = committed_size(&managed.window);
+            let size = resize.size();
+            let ended = resize.end_since.is_some();
+            // The layout reports the requested rectangle, anchored on the
+            // edges the pointer does not move; `rect_at` replaces its size
+            // with the client's committed one until the client catches up.
+            let rect = resize.rect_for(size);
+            managed.floating_rect = rect;
+            managed.target_rect = rect;
+            managed.animation = None;
+            if force || !throttle || resize.caught_up() {
+                resize.sent = Some(size);
+                configure = Some((size, !ended));
+                // The final configure is out and the client already drew that
+                // size: nothing is left to wait for.
+                finished = ended && resize.committed == size;
+            }
+        }
         if let Some(pending) = &mut state.core.layout.pending {
             pending.targets.remove(&id);
         }
-        if let Some(toplevel) = window.toplevel() {
-            toplevel.with_pending_state(|pending| {
-                pending.size = Some(Size::from((rect.size.w.max(1), rect.size.h.max(1))));
-            });
-            toplevel.send_pending_configure();
+        if let Some((size, resizing)) = configure {
+            let Some(managed) = state.core.layout.windows.get_mut(&id) else {
+                return;
+            };
+            send_resize_configure(managed, size, resizing);
+            if finished {
+                managed.resize = None;
+            }
         }
+        // Throttled frames still have to repaint: the anchored rectangle may
+        // have moved even though no new configure went out.
         state.core.layout.dirty_space = true;
         state.core.queue_redraw_all();
     }
@@ -3199,6 +3536,12 @@ fn apply_desired(state: &mut State, desired: HashMap<u64, Rectangle<i32, Logical
                 managed.animation = None;
                 continue;
             }
+            // An interactive resize owns this window's configure pacing. A
+            // layout reflow in the middle of a drag must not bypass the
+            // throttle and queue another size on top of the one in flight.
+            if managed.resize.is_some() {
+                continue;
+            }
         }
         trace!("layout desired window {id}: {rect:?}");
         let bounds = output
@@ -3359,6 +3702,14 @@ impl ManagedWindow {
     pub fn rect_at(&self, now: Instant) -> Rectangle<i32, Logical> {
         if let Some(rect) = self.drag_rect {
             return rect;
+        }
+        // An interactive resize draws the client's committed size on the edges
+        // the pointer does not move. Stretching the old buffer to the requested
+        // size instead is what makes a window look blurred while it grows; the
+        // client only ever sees the sizes the compositor asked for, so it
+        // catches up within a frame or two.
+        if let Some(resize) = &self.resize {
+            return resize.rect_for(resize.committed);
         }
         let Some(animation) = &self.animation else {
             return self.target_rect;
@@ -4069,5 +4420,83 @@ mod tests {
         assert_eq!(projected.size, Size::from((200, 100)));
         // A workspace without a card cannot be projected.
         assert_eq!(view.project(9, local), None);
+    }
+
+    fn resize(anchor: ResizeAnchor, origin: (i32, i32)) -> InteractiveResize {
+        return InteractiveResize {
+            anchor,
+            origin: Point::from(origin),
+            desired: Size::from((200, 100)),
+            committed: Size::from((150, 80)),
+            sent: None,
+            end_since: None,
+        };
+    }
+
+    #[test]
+    fn resize_anchors_the_edges_the_pointer_does_not_move() {
+        let bottom_right = resize(
+            ResizeAnchor {
+                fixed_right: true,
+                fixed_bottom: true,
+            },
+            (600, 500),
+        );
+        // Dragging the left/top edges grows the window towards the top left;
+        // the committed size keeps the bottom-right corner on screen.
+        assert_eq!(
+            bottom_right.rect_for(bottom_right.committed),
+            area(450, 420, 150, 80)
+        );
+        assert_eq!(
+            bottom_right.rect_for(bottom_right.size()),
+            area(400, 400, 200, 100)
+        );
+
+        let top_left = resize(
+            ResizeAnchor {
+                fixed_right: false,
+                fixed_bottom: false,
+            },
+            (100, 50),
+        );
+        assert_eq!(
+            top_left.rect_for(top_left.committed),
+            area(100, 50, 150, 80)
+        );
+        assert_eq!(top_left.rect_for(top_left.size()), area(100, 50, 200, 100));
+    }
+
+    #[test]
+    fn resize_throttle_waits_for_the_acknowledged_size() {
+        let mut resize = resize(
+            ResizeAnchor {
+                fixed_right: false,
+                fixed_bottom: false,
+            },
+            (0, 0),
+        );
+        // No configure went out yet: the next size may be sent immediately.
+        assert!(resize.caught_up());
+        resize.sent = Some(Size::from((300, 200)));
+        // The client still draws the previous size: a new configure would only
+        // queue work it cannot keep up with.
+        resize.committed = Size::from((250, 200));
+        assert!(!resize.caught_up());
+        resize.committed = Size::from((300, 200));
+        assert!(resize.caught_up());
+    }
+
+    #[test]
+    fn resize_size_never_collapses_to_zero() {
+        let mut resize = resize(
+            ResizeAnchor {
+                fixed_right: false,
+                fixed_bottom: false,
+            },
+            (0, 0),
+        );
+        resize.desired = Size::from((0, 0));
+        assert_eq!(resize.size(), Size::from((1, 1)));
     }
 }

@@ -6,6 +6,8 @@
 //! This is the debugging backend (`poly --backend winit`): input comes from the
 //! host window, and frames are drawn into it with GLES2.
 
+use std::time::Instant;
+
 use anyhow::anyhow;
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::gles::GlesRenderer;
@@ -29,7 +31,27 @@ use crate::core::{self, Core};
 use crate::state::State;
 
 /// Refresh rate reported for the nested window.
+///
+/// Only used when the host monitor does not report one.
 const REFRESH: i32 = 60_000;
+
+/// The host monitor's refresh rate in millihertz.
+///
+/// A nested session runs at whatever the host display does; assuming 60 Hz
+/// makes animations jitter against a 144 Hz host because the frame clock and
+/// the animation watchdog both use the mode.
+fn host_refresh(window: &dyn smithay::reexports::winit::window::Window) -> i32 {
+    let Some(monitor) = window.current_monitor() else {
+        return REFRESH;
+    };
+    let Some(mode) = monitor.current_video_mode() else {
+        return REFRESH;
+    };
+    return mode
+        .refresh_rate_millihertz()
+        .and_then(|rate| return i32::try_from(rate.get()).ok())
+        .unwrap_or(REFRESH);
+}
 
 /// The nested window; there is exactly one output.
 pub struct Winit {
@@ -73,7 +95,7 @@ impl Winit {
 
         let mode = Mode {
             size: backend.window_size(),
-            refresh: REFRESH,
+            refresh: host_refresh(backend.window()),
         };
         let output = Output::new(
             "winit".to_owned(),
@@ -106,10 +128,11 @@ impl Winit {
                 match event {
                     WinitEvent::Resized { size, scale_factor } => {
                         debug!("winit window resized to {size:?}");
-                        let mode = Mode {
-                            size,
-                            refresh: REFRESH,
+                        let refresh = match &state.backend {
+                            Backend::Winit(winit) => host_refresh(winit.backend.window()),
+                            _ => REFRESH,
                         };
+                        let mode = Mode { size, refresh };
                         // The host decides the size, and normally the scale
                         // too — but `outputs.<name>.scale` overrides the scale
                         // (`docs/config.md`), and this event arrives after
@@ -142,6 +165,10 @@ impl Winit {
                         if let Backend::Winit(winit) = &mut state.backend {
                             winit.host_frame_ready = true;
                         }
+                        // The host is ready to draw again: the previously
+                        // submitted frame is on screen. That boundary is what
+                        // the animation frame clock snaps to.
+                        state.core.frame_presented(&event_output, Instant::now());
                         // The host frame boundary is what drives animation
                         // frames: queueing here (rather than from a wall-clock
                         // timer) keeps every animation step on a presented
@@ -220,6 +247,7 @@ impl Winit {
         // damage of the frames it was last used for. It is only meaningful
         // while the previous frame is still bound, so query it before binding.
         let age = self.backend.buffer_age().unwrap_or(0);
+        let now = core.begin_frame(&self.output);
 
         let (damage, mut feedback) = {
             let (renderer, mut framebuffer) = match self.backend.bind() {
@@ -230,7 +258,7 @@ impl Winit {
                 }
             };
 
-            let elements = render::output_elements(core, renderer, &self.output, true);
+            let elements = render::output_elements(core, renderer, &self.output, true, now);
             let background = core
                 .output_background(&self.output)
                 .map(|color| return color.to_floats())
@@ -254,7 +282,7 @@ impl Winit {
             (damage, feedback)
         };
 
-        let time = core.start_time.elapsed();
+        let time = core.monotonic_now();
 
         let Some(damage) = damage else {
             // Nothing changed, so the host keeps the last frame. Clients still

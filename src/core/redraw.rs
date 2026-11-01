@@ -6,7 +6,7 @@
 //! explicit states, and frames are only produced when something queued a redraw
 //! or when we are waiting for the VBlank of a frame we already submitted.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use smithay::output::Output;
 use smithay::reexports::calloop::RegistrationToken;
@@ -111,6 +111,68 @@ impl RedrawState {
     }
 }
 
+/// Predicts when the frame being rendered will be on screen.
+///
+/// Ported from niri (`src/frame_clock.rs`). Animations are sampled at
+/// [`FrameClock::next_presentation_time`] instead of `Instant::now()` so that
+/// consecutive frames are exactly one refresh interval apart: the event loop's
+/// dispatch latency no longer shows up as uneven animation steps.
+#[derive(Debug, Default)]
+pub struct FrameClock {
+    /// The last VBlank the output reported (or the last submitted frame when
+    /// the backend has no presentation timestamp).
+    last_presentation: Option<Instant>,
+    /// The output's refresh interval, once it has a mode.
+    refresh_interval: Option<Duration>,
+}
+
+impl FrameClock {
+    /// Set the refresh interval; a mode change invalidates the VBlank grid.
+    pub fn set_refresh_interval(&mut self, interval: Option<Duration>) {
+        if self.refresh_interval == interval {
+            return;
+        }
+        self.refresh_interval = interval;
+        self.last_presentation = None;
+    }
+
+    /// Record a presented frame.
+    pub fn presented(&mut self, time: Instant) {
+        self.last_presentation = Some(time);
+    }
+
+    /// The next VBlank on the output's grid at or after `now`.
+    ///
+    /// Without a refresh interval or a presentation yet there is no grid to
+    /// snap to; the frame time is simply `now`.
+    pub fn next_presentation_time(&self, now: Instant) -> Instant {
+        let Some(interval) = self
+            .refresh_interval
+            .filter(|value| return !value.is_zero())
+        else {
+            return now;
+        };
+        let Some(last) = self.last_presentation else {
+            return now;
+        };
+        // An early VBlank (or a clock that stepped back) must not produce a
+        // time before the last presentation. niri advances `now` by one
+        // interval, which still yields the next grid point.
+        let mut now = now;
+        if now <= last {
+            now += interval;
+            if now < last {
+                now = last + interval;
+            }
+        }
+        let steps = now.saturating_duration_since(last).as_nanos() / interval.as_nanos() + 1;
+        // A long stall may skip several frames; clamping keeps the Duration
+        // multiplication below in range (u32 frames is over four years at 60 Hz).
+        let steps = u32::try_from(steps).unwrap_or(u32::MAX);
+        return last + interval * steps;
+    }
+}
+
 /// Compositor state attached to one output.
 #[derive(Debug, Default)]
 pub struct OutputState {
@@ -118,6 +180,8 @@ pub struct OutputState {
     pub global: Option<GlobalId>,
     /// Redraw scheduling state.
     pub redraw_state: RedrawState,
+    /// When the frame currently being rendered will be presented.
+    pub frame_clock: FrameClock,
     /// Incremented for every frame whose callbacks were sent; used to throttle
     /// frame callbacks so a surface gets at most one per presented frame.
     pub frame_callback_sequence: u64,
@@ -293,5 +357,63 @@ mod tests {
         // Absurd modes stay inside the clamp.
         assert_eq!(frame_interval(&output_with(1_000_000)), MIN_FRAME_INTERVAL);
         assert_eq!(frame_interval(&output_with(100)), MAX_FRAME_INTERVAL);
+    }
+
+    #[test]
+    fn frame_clock_snaps_to_the_vblank_grid() {
+        let mut clock = FrameClock::default();
+        let start = Instant::now();
+        let interval = Duration::from_millis(10);
+
+        // No presentation yet: there is no grid to snap to.
+        clock.set_refresh_interval(Some(interval));
+        assert_eq!(clock.next_presentation_time(start), start);
+
+        clock.presented(start);
+        // Called right after the VBlank: the frame lands on the next one.
+        assert_eq!(
+            clock.next_presentation_time(start + Duration::from_millis(1)),
+            start + interval
+        );
+        // Called after two intervals: skip the VBlank that already passed.
+        assert_eq!(
+            clock.next_presentation_time(start + Duration::from_millis(11)),
+            start + interval * 2
+        );
+        // A later presentation re-anchors the grid.
+        let later = start + Duration::from_millis(15);
+        clock.presented(later);
+        assert_eq!(
+            clock.next_presentation_time(later + Duration::from_millis(1)),
+            later + interval
+        );
+    }
+
+    #[test]
+    fn frame_clock_handles_early_vblanks_and_interval_changes() {
+        let mut clock = FrameClock::default();
+        let start = Instant::now();
+        clock.set_refresh_interval(Some(Duration::from_millis(10)));
+        clock.presented(start + Duration::from_millis(5));
+        // An early VBlank must not produce a time before the last one.
+        assert_eq!(
+            clock.next_presentation_time(start),
+            start + Duration::from_millis(15)
+        );
+
+        // A mode change invalidates the old grid.
+        clock.set_refresh_interval(Some(Duration::from_millis(20)));
+        assert_eq!(clock.next_presentation_time(start), start);
+        clock.presented(start);
+        assert_eq!(
+            clock.next_presentation_time(start + Duration::from_millis(1)),
+            start + Duration::from_millis(20)
+        );
+
+        // A zero interval cannot be used as a divisor.
+        clock.set_refresh_interval(Some(Duration::ZERO));
+        assert_eq!(clock.next_presentation_time(start), start);
+        clock.set_refresh_interval(None);
+        assert_eq!(clock.next_presentation_time(start), start);
     }
 }

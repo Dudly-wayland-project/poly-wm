@@ -383,7 +383,7 @@ impl FrameData {
                 // Flags stay empty: the picture is top-down, as the protocol's
                 // default orientation.
                 frame.flags(Flags::empty());
-                let elapsed = core.start_time.elapsed();
+                let elapsed = core.monotonic_now();
                 let secs = elapsed.as_secs();
                 frame.ready(
                     (secs >> 32) as u32,

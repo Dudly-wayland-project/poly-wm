@@ -814,6 +814,9 @@ pub struct WindowDrag {
     pub escape_cancels: bool,
     /// How the resize edges are picked from the pointer position.
     pub resize_pick: ResizePick,
+    /// Whether an interactive resize waits for the client to acknowledge a
+    /// size before asking for the next one.
+    pub throttle_resize: bool,
 }
 
 impl Default for WindowDrag {
@@ -824,6 +827,7 @@ impl Default for WindowDrag {
             axis_lock: Some(ModKey::Shift),
             escape_cancels: true,
             resize_pick: ResizePick::Thirds,
+            throttle_resize: true,
         };
     }
 }
@@ -1159,6 +1163,7 @@ mod tests {
         assert_eq!(config.input.keyboard.repeat_delay, 600);
         assert_eq!(config.window_drag.threshold, 8.0);
         assert!(config.window_drag.escape_cancels);
+        assert!(config.window_drag.throttle_resize);
         assert_eq!(config.window_drag.axis_lock, Some(ModKey::Shift));
         assert_eq!(config.window_drag.tiled, TiledDrag::Reorder);
         assert_eq!(config.window_drag.resize_pick, ResizePick::Thirds);

@@ -6,7 +6,7 @@
 //! windows and get frame callbacks; frames are "presented" immediately, since
 //! there is nothing to wait for.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use smithay::backend::renderer::element::RenderElementStates;
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
@@ -78,7 +78,9 @@ impl Headless {
 
         core.output_state(output).redraw_state = RedrawState::Idle;
 
-        let time = core.start_time.elapsed();
+        // Headless frames are presented as soon as they are rendered.
+        core.frame_presented(output, Instant::now());
+        let time = core.monotonic_now();
 
         // Nothing was drawn, so the element states are empty; presenting the
         // feedbacks anyway keeps clients' frame pacing in a sane rhythm.

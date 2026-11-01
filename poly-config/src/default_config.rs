@@ -111,6 +111,7 @@ return {
     axis_lock = "shift",          -- hold Shift to lock one axis; false disables
     escape_cancels = true,        -- Esc restores the geometry and cancels
     resize_pick = "thirds",       -- or a pixel width, e.g. 8
+    throttle_resize = true,       -- one size request per client acknowledgement
   },
 
   overview = {

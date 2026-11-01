@@ -133,7 +133,7 @@ impl ImageCopyCaptureHandler for State {
                 frame.success(
                     Transform::Normal,
                     outcome.frame_damage(),
-                    core.start_time.elapsed(),
+                    core.monotonic_now(),
                 );
             }
             Err(err) => {
@@ -212,7 +212,7 @@ impl ImageCopyCaptureHandler for State {
                 frame.success(
                     Transform::Normal,
                     None::<Vec<Rectangle<i32, Buffer>>>,
-                    core.start_time.elapsed(),
+                    core.monotonic_now(),
                 );
             }
             Err(err) => {

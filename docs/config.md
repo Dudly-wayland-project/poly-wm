@@ -480,6 +480,7 @@ window_drag = {
     axis_lock = "shift",
     escape_cancels = true,
     resize_pick = "thirds",
+    throttle_resize = true,
 }
 ```
 
@@ -490,6 +491,7 @@ window_drag = {
 | `axis_lock` | `"shift"` | Modifier that locks a drag to one axis, or `false` to disable axis locking. |
 | `escape_cancels` | `true` | Let Escape cancel a drag and restore the original geometry. |
 | `resize_pick` | `"thirds"` | Resize edge picker: `"thirds"` reserves the middle third of an edge as non-resizable, or a non-negative pixel distance from the border. |
+| `throttle_resize` | `true` | Ask for at most one new window size per client acknowledgement while resizing. Turn it off only for clients that resize badly when a configure is withheld. |
 
 ## `spawn_at_startup`
 

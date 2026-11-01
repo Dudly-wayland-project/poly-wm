@@ -1726,6 +1726,7 @@ fn parse_window_drag(table: &Table, errors: &mut Errors) -> WindowDrag {
         "axis_lock",
         "escape_cancels",
         "resize_pick",
+        "throttle_resize",
     ];
     let base = "window_drag";
     lx::warn_unknown(table, base, KEYS, errors);
@@ -1775,6 +1776,9 @@ fn parse_window_drag(table: &Table, errors: &mut Errors) -> WindowDrag {
     }
     if let Some(value) = lx::boolean(table, "escape_cancels", base, errors) {
         drag.escape_cancels = value;
+    }
+    if let Some(value) = lx::boolean(table, "throttle_resize", base, errors) {
+        drag.throttle_resize = value;
     }
     if let Some(value) = lx::field(table, "resize_pick") {
         match value {
@@ -2524,7 +2528,7 @@ mod tests {
                     ["Mod+F"] = "toggle-floating",
                     ["Mod+R"] = { action = "resize-window", key_repeat = false },
                 },
-                window_drag = { tiled = "ignore", threshold = 4, escape_cancels = false },
+                window_drag = { tiled = "ignore", threshold = 4, escape_cancels = false, throttle_resize = false },
                 spawn_at_startup = { { exec = { "waybar" } }, "wl-paste --watch cliphist store" },
                 environment = { POLY_TEST = "1" },
                 layer_rules = {
@@ -2581,6 +2585,7 @@ mod tests {
         assert_eq!(config.window_drag.tiled, TiledDrag::Ignore);
         assert_eq!(config.window_drag.threshold, 4.0);
         assert!(!config.window_drag.escape_cancels);
+        assert!(!config.window_drag.throttle_resize);
         assert_eq!(
             config.spawn_at_startup,
             vec![

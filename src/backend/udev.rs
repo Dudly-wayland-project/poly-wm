@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
 use smithay::backend::allocator::Fourcc;
@@ -739,7 +739,8 @@ impl Udev {
         };
 
         let outcome = {
-            let elements = render::output_elements(core, &mut renderer, output, true);
+            let now = core.begin_frame(output);
+            let elements = render::output_elements(core, &mut renderer, output, true, now);
             let background = core
                 .output_background(output)
                 .map(|color| return color.to_floats())
@@ -852,7 +853,7 @@ impl Udev {
                             | wp_presentation_feedback::Kind::HwCompletion,
                     ),
                     _ => (
-                        Time::<Monotonic>::from(core.start_time.elapsed()),
+                        Time::<Monotonic>::from(core.monotonic_now()),
                         0,
                         wp_presentation_feedback::Kind::Vsync,
                     ),
@@ -868,7 +869,19 @@ impl Udev {
             Err(err) => warn!("error finishing a frame on {}: {err:?}", output.name()),
         }
 
-        let time = core.start_time.elapsed();
+        // The DRM timestamp is on `CLOCK_MONOTONIC`; map it onto our `Instant`
+        // timeline so the frame clock can predict the next VBlank. Without one
+        // (a driver that does not report it), the moment we handled the event
+        // is close enough, and the snap-to-grid math removes the jitter.
+        let presented = match metadata.map(|metadata| return metadata.time) {
+            Some(DrmEventTime::Monotonic(time)) if !time.is_zero() => {
+                core.instant_at_monotonic(time)
+            }
+            _ => Instant::now(),
+        };
+        core.frame_presented(&output, presented);
+
+        let time = core.monotonic_now();
         render::send_frame_callbacks(core, &output, time);
 
         // The frame is on the screen: leave the wait state, and render again if a
@@ -953,8 +966,11 @@ impl Udev {
         );
         match previous {
             RedrawState::WaitingForEstimatedVBlank(_) => {
-                // Pretend a VBlank happened, so clients keep animating.
-                let time = core.start_time.elapsed();
+                // Pretend a VBlank happened, so clients keep animating. The
+                // timer fires at the estimated VBlank, so this is also the
+                // frame clock's next grid point.
+                let time = core.monotonic_now();
+                core.frame_presented(output, Instant::now());
                 render::send_frame_callbacks(core, output, time);
                 // The estimated VBlank is a frame boundary too: an ongoing
                 // animation continues from it, exactly like after a real

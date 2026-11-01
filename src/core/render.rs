@@ -92,6 +92,10 @@ const FRAME_CALLBACK_THROTTLE: Option<Duration> = Some(Duration::from_millis(995
 
 /// Build the elements for one frame of `output`: space contents plus cursor.
 ///
+/// `now` is the frame clock of the frame being drawn (see
+/// [`Core::begin_frame`]); every animation is sampled from it so the whole
+/// frame is consistent.
+///
 /// This is also where the shader programs are (re)compiled and where compile
 /// errors are turned into Toasts: the GL context is only valid here.
 pub fn output_elements<R>(
@@ -99,6 +103,7 @@ pub fn output_elements<R>(
     renderer: &mut R,
     output: &Output,
     include_cursor: bool,
+    now: Instant,
 ) -> Vec<OutputElements<R>>
 where
     R: PolyRenderer,
@@ -195,7 +200,6 @@ where
         return elements;
     };
     let scale = output.current_scale().fractional_scale();
-    let now = Instant::now();
     let time = core.start_time.elapsed().as_secs_f32();
 
     // Snapshot the windows so rendering does not hold a borrow of the layout
@@ -370,7 +374,7 @@ where
     // in, drawn above the tiled windows but below the dragged one. It is not
     // meaningful while the overview is open.
     if !overview {
-        push_drag_hint(&mut elements, core, output, output_geometry, scale);
+        push_drag_hint(&mut elements, core, output, output_geometry, scale, now);
     }
     push_closing(
         &mut elements,
@@ -715,6 +719,7 @@ fn push_drag_hint<R>(
     output: &Output,
     output_geometry: Rectangle<i32, Logical>,
     scale: f64,
+    now: Instant,
 ) where
     R: PolyRenderer,
     R::TextureId: Clone + Send + 'static,
@@ -723,7 +728,6 @@ fn push_drag_hint<R>(
         return;
     };
     // `rect` is workspace-local; project it exactly like the windows.
-    let now = Instant::now();
     let view = core.layout.view(output, output_geometry, now);
     let Some(rect) = view.project(workspace, rect) else {
         return;
@@ -1474,15 +1478,20 @@ pub fn send_frame_callbacks(core: &mut Core, output: &Output, time: Duration) {
     let overview = core.layout.overview_visible(now);
     let active = core.layout.active_workspace(output);
     for window in core.space.elements() {
-        if !overview {
-            let visible = core
-                .layout
-                .by_window(window)
-                .and_then(|managed| return core.layout.workspace_of(managed.id))
-                .is_none_or(|(_, workspace)| return workspace == active);
-            if !visible {
-                continue;
-            }
+        // A window is only drawn on the output that owns its workspace, even
+        // while the overview shows every workspace of that output. Two outputs
+        // can show the same workspace index at once, so comparing the index
+        // alone would send a callback for an output the window is not on (and
+        // wake its client for nothing).
+        let visible = core
+            .layout
+            .by_window(window)
+            .and_then(|managed| return core.layout.workspace_of(managed.id))
+            .is_none_or(|(owner, workspace)| {
+                return &owner == output && (overview || workspace == active);
+            });
+        if !visible {
+            continue;
         }
         window.send_frame(output, time, FRAME_CALLBACK_THROTTLE, |_, _| {
             return Some(output.clone());
@@ -1752,7 +1761,7 @@ pub fn capture_output(
     // The element list needs `&mut Core` and the renderer, so it is built
     // before the session is borrowed: `CaptureState` is a separate field of
     // `State` for exactly this reason (`handlers/image_copy_capture.rs`).
-    let elements = output_elements(core, renderer, output, draw_cursor);
+    let elements = output_elements(core, renderer, output, draw_cursor, Instant::now());
     let background = core
         .output_background(output)
         .map(|color| return color.to_floats())
@@ -1799,7 +1808,7 @@ pub fn capture_region(
     // The element list needs `&mut Core` and the renderer, so it is built before
     // the target is borrowed (`handlers/screencopy.rs` destructures `State` for
     // the same reason).
-    let elements = output_elements(core, renderer, output, draw_cursor);
+    let elements = output_elements(core, renderer, output, draw_cursor, Instant::now());
     let background = core
         .output_background(output)
         .map(|color| return color.to_floats())
