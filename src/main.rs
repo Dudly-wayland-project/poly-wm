@@ -1,4 +1,4 @@
-//! Poly — a Wayland compositor with Lua-scriptable layouts.
+//! Poly — a Wayland compositor with JavaScript-scriptable layouts.
 
 // Project convention: every function body ends with an explicit `return`,
 // see rust-systems-dev coding-guidelines §2.9.

@@ -29,7 +29,7 @@ rev = "118e34ffc9b99854a2230c4805e1f37dc9029edb"
 
 [package]
 name = "poly"
-description = "A Wayland compositor with Lua-scriptable layouts"
+description = "A Wayland compositor with JavaScript-scriptable layouts"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

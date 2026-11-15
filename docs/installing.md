@@ -21,8 +21,8 @@ For configuration syntax and runtime control, see [config.md](config.md) and
 
 | Scope | Binary | Configuration | When to use |
 | --- | --- | --- | --- |
-| User | `~/.local/bin/poly` | `~/.config/poly/config.lua` | One user, no root access. Recommended. |
-| System | `/usr/local/bin/poly` | `/etc/poly/config.lua` | All users on the machine; requires root. |
+| User | `~/.local/bin/poly` | `~/.config/poly/config.js` | One user, no root access. Recommended. |
+| System | `/usr/local/bin/poly` | `/etc/poly/config.js` | All users on the machine; requires root. |
 
 Use `/usr/local/bin` rather than `/usr/bin` for a source install. `/usr/bin` is
 owned by the distribution package manager. Without `--config` or
@@ -106,11 +106,11 @@ sudo install -Dm755 target/release/poly /usr/local/bin/poly
 Do not run Cargo itself as root. The release build and the installation step are
 separate.
 
-A system-wide configuration is optional. Poly uses `/etc/poly/config.lua` only
+A system-wide configuration is optional. Poly uses `/etc/poly/config.js` only
 when the user has no configuration file:
 
 ```sh
-sudo install -Dm644 /path/to/config.lua /etc/poly/config.lua
+sudo install -Dm644 /path/to/config.js /etc/poly/config.js
 ```
 
 Most users should keep their configuration in their home directory instead.
@@ -121,7 +121,7 @@ On the first compositor start, Poly writes an annotated default configuration to
 the user location when no configuration file is found:
 
 ```text
-~/.config/poly/config.lua
+~/.config/poly/config.js
 ```
 
 The file is created with `O_EXCL`, so Poly does not overwrite an existing
@@ -131,21 +131,21 @@ configuration is used only when no user configuration exists.
 To install a prepared configuration:
 
 ```sh
-install -Dm644 /path/to/config.lua "$HOME/.config/poly/config.lua"
+install -Dm644 /path/to/config.js "$HOME/.config/poly/config.js"
 ```
 
 For a system default:
 
 ```sh
-sudo install -Dm644 /path/to/config.lua /etc/poly/config.lua
+sudo install -Dm644 /path/to/config.js /etc/poly/config.js
 ```
 
-The repository does not ship a standalone `config.lua`; the default is compiled
+The repository does not ship a standalone `config.js`; the default is compiled
 into the binary. Validate the resolved file without starting the compositor:
 
 ```sh
 poly validate
-poly validate --config /path/to/config.lua
+poly validate --config /path/to/config.js
 ```
 
 See [config.md](config.md) for the lookup order and every setting.

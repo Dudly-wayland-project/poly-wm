@@ -26,7 +26,7 @@ use crate::state::State;
 #[cfg(feature = "dbus")]
 const DEDUPE: Duration = Duration::from_secs(30);
 /// Longest body a daemon is asked to display. Notification daemons truncate
-/// anyway, and a Lua traceback can be long.
+/// anyway, and a JavaScript stack trace can be long.
 #[cfg(feature = "dbus")]
 const MAX_BODY: usize = 4000;
 

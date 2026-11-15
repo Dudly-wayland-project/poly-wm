@@ -150,8 +150,8 @@ impl ResizeGrab {
         if fullscreen {
             return None;
         }
-        // v1 resizes floating windows only: tiled geometry belongs to the Lua
-        // layout.
+        // v1 resizes floating windows only: tiled geometry belongs to the
+        // scripted layout.
         if tiled {
             return None;
         }

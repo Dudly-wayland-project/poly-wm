@@ -1,9 +1,9 @@
-//! The configuration types, filled in from Lua by [`crate::lua`].
+//! The configuration types, filled in from JavaScript by [`crate::js`].
 //!
-//! Field names and defaults follow `docs/config.md`; the Lua layer in
-//! [`crate::lua`] and [`crate::layout`] fills this model and validates it. A
-//! configuration written for a newer build still loads after a downgrade, as
-//! unknown settings are warnings rather than errors.
+//! Field names and defaults follow `docs/config.md`; the JavaScript layer in
+//! [`crate::js::parse`] and [`crate::js::layout`] fills this model and
+//! validates it. A configuration written for a newer build still loads after a
+//! downgrade, as unknown settings are warnings rather than errors.
 
 use crate::binds::Keybind;
 
@@ -25,7 +25,7 @@ pub struct Config {
     /// Rules for layer surfaces (bars, notifications, launchers), first match
     /// wins.
     pub layer_rules: Vec<LayerRule>,
-    /// Named Lua layouts, in configuration order.
+    /// Named scripted layouts, in configuration order.
     pub layouts: Vec<LayoutInfo>,
     /// The layout new outputs start with. Empty means the built-in fallback.
     pub default_layout: Option<String>,
@@ -141,10 +141,11 @@ fn merge_output(target: &mut OutputConfig, source: &OutputConfig) {
 
 /// Order `outputs` patterns from most to least specific.
 ///
-/// Lua's `pairs()` does not preserve the order the file wrote the entries in,
-/// so "the most specific match wins" is only meaningful once the patterns are
-/// sorted: exact names first, then globs by how many literal characters they
-/// have, then alphabetically as a tie breaker.
+/// JavaScript object keys do not preserve the order the file wrote the entries
+/// in for integer-like names, so "the most specific match wins" is only
+/// meaningful once the patterns are sorted: exact names first, then globs by
+/// how many literal characters they have, then alphabetically as a tie
+/// breaker.
 pub(crate) fn sort_output_patterns(outputs: &mut [(String, OutputConfig)]) {
     outputs.sort_by(|(left, _), (right, _)| {
         return specificity(left).cmp(&specificity(right));
@@ -171,9 +172,9 @@ pub struct General {
     pub prefer_no_csd: bool,
     /// Spacing in logical pixels, applied by the compositor: layouts get a
     /// work area inset by this much on every side (`ctx.output.work_area`), and
-    /// layouts use `poly.gap` for the spacing between windows. It therefore
-    /// affects window width *and* height, and keeps windows clear of layer-shell
-    /// bars.
+    /// layouts use `ctx.gap` for the spacing between windows. It therefore
+    /// affects window width *and* height, and keeps windows clear of
+    /// layer-shell bars.
     pub gap: i32,
     /// Geometry and open/close animations.
     pub animations: Animations,
@@ -546,7 +547,7 @@ impl AnimationCurve {
         };
     }
 
-    /// Parse the name used in Lua configuration.
+    /// Parse the name used in a configuration file.
     pub fn parse(name: &str) -> Option<AnimationCurve> {
         return match name {
             "linear" => Some(AnimationCurve::Linear),
@@ -895,7 +896,7 @@ pub enum StartupSpawn {
     Shell(String),
 }
 
-/// A named Lua layout.
+/// A named scripted layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutInfo {
     /// The name used by `default_layout`, `set-layout` and `cycle-layout`.
@@ -985,7 +986,7 @@ pub struct OutputConfig {
     pub focus: Option<bool>,
     /// Solid color drawn behind every window of this output.
     pub background: Option<Color>,
-    /// Values passed to Lua layouts in `ctx.options`.
+    /// Values passed to scripted layouts in `ctx.options`.
     pub layout_options: Vec<(String, LayoutOptionValue)>,
 }
 

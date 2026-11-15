@@ -3,9 +3,10 @@
 //! Action dispatch: the one implementation of the `poly-ipc` action vocabulary
 //! (`AGENTS.md` §2.6).
 //!
-//! Lua key bindings, the IPC `Action` request and `poly msg action` all end up
-//! here. Layout actions are forwarded to the active workspace's Lua layout,
-//! when it has one; every other action acts on the compositor state directly.
+//! Key bindings, the IPC `Action` request and `poly msg action` all end up
+//! here. Layout actions are forwarded to the active workspace's scripted
+//! layout, when it has one; every other action acts on the compositor state
+//! directly.
 
 use poly_ipc::Action;
 use smithay::desktop::Window;

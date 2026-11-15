@@ -1,6 +1,6 @@
 // Ported from niri (GPL-3.0-or-later): niri-config/src/binds.rs
 // Only the trigger half: the v1 action vocabulary lives in `poly-ipc`
-// (`poly-ipc::Action`) so Lua, IPC and `poly msg` share one set of names.
+// (`poly-ipc::Action`) so scripts, IPC and `poly msg` share one set of names.
 
 //! Key bindings: which key (or mouse button, or scroll wheel tick) with which
 //! modifiers triggers an action.

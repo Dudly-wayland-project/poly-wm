@@ -3,7 +3,7 @@
 //! Poly runs without a configuration file (the built-in defaults are niri's),
 //! but a user with no file has nothing to edit. When none is found the
 //! compositor writes this template to the usual location, so that the first
-//! thing the documentation says — "edit `~/.config/poly/config.lua`" — actually
+//! thing the documentation says — "edit `~/.config/poly/config.js`" — actually
 //! works, and the file explains itself.
 //!
 //! The template is a valid configuration: it parses without warnings and only
@@ -16,151 +16,151 @@ use std::path::{Path, PathBuf};
 
 use crate::locate::ConfigSource;
 
-/// The text written to a fresh `~/.config/poly/config.lua`.
-pub const DEFAULT_CONFIG: &str = r##"-- Poly configuration (`docs/config.md` for every setting).
---
--- The file is Lua: it is executed, and its return value is the configuration.
--- `poly.setup{ … }` works as well. `poly.include("bindings.lua")` runs another
--- file and returns its value, which is how a big configuration stays readable;
--- included files are reloaded too when they change.
---
--- A `theme.lua` next to this file is merged over it when it exists, which is
--- where a palette generator writes its colours; it needs no change here.
---
--- Saving this file applies it immediately, with no restart. A broken edit keeps
--- the previous configuration running and shows the problem in a Toast.
+/// The text written to a fresh `~/.config/poly/config.js`.
+pub const DEFAULT_CONFIG: &str = r##"// Poly configuration (`docs/config.md` for every setting).
+//
+// The file is JavaScript. It runs once and calls the helpers below, which
+// collect the configuration; nothing is returned. `config({ … })` may be called
+// more than once, objects are merged and arrays are replaced, so a file can be
+// split into readable sections or included files:
+//
+//   include("bindings.js");   // runs another file in this same global scope
+//
+// `read_file("path")` returns a file as a string, for generated snippets.
+//
+// A `theme.js` next to this file is merged over it when it exists, which is
+// where a palette generator writes its colours; it needs no change here.
+//
+// Saving this file applies it immediately, with no restart. A broken edit keeps
+// the previous configuration running and shows the problem in a Toast.
 
-return {
-  general = {
-    -- The modifier that bindings below spell as `Mod`. Defaults to Super on a
-    -- real session and to Alt when nested in another compositor.
-    -- mod_key = "Super",
-    gap = 8,                      -- space between windows and the output edges
-    prefer_no_csd = true,         -- ask clients to use server-side decorations
-    border = {
-      width = 2,
-      radius = 8,
-      active = "#4f8cff",
-      inactive = "#3a3a3a",
+config({
+  general: {
+    // The modifier that bindings below spell as `Mod`. Defaults to Super on a
+    // real session and to Alt when nested in another compositor.
+    // mod_key: "Super",
+    gap: 8,                      // space between windows and the output edges
+    prefer_no_csd: true,         // ask clients to use server-side decorations
+    border: {
+      width: 2,
+      radius: 8,
+      active: "#4f8cff",
+      inactive: "#3a3a3a",
     },
-    animations = {
-      duration = 180,             -- milliseconds
-      window_close = { duration = 180 },
+    animations: {
+      duration: 180,             // milliseconds
+      window_close: { duration: 180 },
     },
-    -- The pointer Poly draws. Unset follows `$XCURSOR_THEME`/`$XCURSOR_SIZE`.
-    -- cursor = { theme = "Adwaita", size = 24 },
+    // The pointer Poly draws. Unset follows `$XCURSOR_THEME`/`$XCURSOR_SIZE`.
+    // cursor: { theme: "Adwaita", size: 24 },
   },
 
-  -- Input devices. Entries match by glob, first match wins.
-  input = {
-    keyboard = { layout = "us" },
-    -- devices = {
-    --   ["*touchpad*"] = { natural_scroll = true, tap = true, accel = "adaptive" },
-    --   ["*Mouse*"]    = { accel = "flat" },
-    -- },
+  // Input devices. Entries match by glob, first match wins.
+  input: {
+    keyboard: { layout: "us" },
+    // devices: {
+    //   "*touchpad*": { natural_scroll: true, tap: true, accel: "adaptive" },
+    //   "*Mouse*":    { accel: "flat" },
+    // },
   },
 
-  -- Every action is spelled as in `poly msg action …`; see `docs/config.md`
-  -- for the full list.
-  keybinds = {
-    ["Mod+Return"]  = { spawn = { "foot" } },
-    ["Mod+Q"]       = "close-window",
-    ["Mod+Space"]   = "toggle-floating",
-    ["Mod+F"]       = "toggle-fullscreen",
-    ["Mod+Tab"]     = "cycle-layout",
-    ["Mod+Left"]    = "focus-left",
-    ["Mod+Right"]   = "focus-right",
-    ["Mod+Up"]      = "focus-up",
-    ["Mod+Down"]    = "focus-down",
-    ["Mod+Shift+Left"] = "move-window-left",
-    ["Mod+Shift+Right"] = "move-window-right",
-    -- Workspaces: one vertical stack per output.
-    ["Mod+Page_Up"]   = "focus-workspace-up",
-    ["Mod+Page_Down"] = "focus-workspace-down",
-    ["Mod+1"]         = { focus_workspace = 1 },
-    ["Mod+2"]         = { focus_workspace = 2 },
-    ["Mod+3"]         = { focus_workspace = 3 },
-    ["Mod+O"]         = "toggle-overview",
-    ["Mod+R"]         = "reload-config",
-    -- Mouse bindings move and resize windows.
-    ["Mod+MouseLeft"]  = "move-window",
-    ["Mod+MouseRight"] = "resize-window",
-    -- Media keys are passed through by `xkb`; bind them here when the session
-    -- does not have a separate daemon.
-    -- ["XF86AudioRaiseVolume"] = { spawn = { "wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "5%+" } },
+  window_drag: {
+    tiled: "reorder",            // dragging a tiled window reorders the layout
+    threshold: 8,                // pixels before a drag starts
+    axis_lock: "shift",          // hold Shift to lock one axis; false disables
+    escape_cancels: true,        // Esc restores the geometry and cancels
+    resize_pick: "thirds",       // or a pixel width, e.g. 8
+    throttle_resize: true,       // one size request per client acknowledgement
   },
 
-  -- Display settings, keyed by output name or glob. Every matching entry is
-  -- merged, the most specific one winning field by field, so `["*"]` holds the
-  -- defaults for outputs plugged in later.
-  outputs = {
-    ["*"] = {
-      -- mode = "preferred",       -- or "<width>x<height>[@<hz>]"
-      -- scale = 1.0,              -- or "auto"
-      -- transform = "normal",     -- 90 / 180 / 270 / flipped / flipped-90 …
-      -- position = "auto",        -- or { x = 0, y = 0 }
-      -- vrr = true,               -- DRM only
-      -- focus = true,             -- this output is the focused one
-      background = "#000000",      -- painted behind every window
-    },
+  overview: {
+    zoom: 0.5,
+    backdrop_color: "#262626",
+    card_color: "#404040",
   },
 
-  window_drag = {
-    tiled = "reorder",            -- dragging a tiled window reorders the layout
-    threshold = 8,                -- pixels before a drag starts
-    axis_lock = "shift",          -- hold Shift to lock one axis; false disables
-    escape_cancels = true,        -- Esc restores the geometry and cancels
-    resize_pick = "thirds",       -- or a pixel width, e.g. 8
-    throttle_resize = true,       -- one size request per client acknowledgement
+  // Problems always appear as on-screen Toasts; set this to also send them to
+  // the desktop notification daemon (needs a build with the `dbus` feature).
+  errors: { dbus: false },
+
+  // X11 clients (xterm, Steam, ...) run through xwayland-satellite. X11 is
+  // only started when an X11 program connects; every child poly spawns from
+  // then on gets `DISPLAY` set. Set `enable: false` for a Wayland-only
+  // session, or `on_demand: false` to keep the satellite running.
+  xwayland: {
+    enable: true,
+    satellite_path: "xwayland-satellite",
+    on_demand: true,
+    spawn_at_startup: false,
   },
+});
 
-  overview = {
-    zoom = 0.5,
-    backdrop_color = "#262626",
-    card_color = "#404040",
-  },
+// Display settings, keyed by output name or glob. Every matching entry is
+// merged, the most specific one winning field by field, so `"*"` holds the
+// defaults for outputs plugged in later.
+output("*", {
+  // mode: "preferred",       // or "<width>x<height>[@<hz>]"
+  // scale: 1.0,              // or "auto"
+  // transform: "normal",     // 90 / 180 / 270 / flipped / flipped-90 …
+  // position: "auto",        // or { x: 0, y: 0 }
+  // vrr: true,               // DRM only
+  // focus: true,             // this output is the focused one
+  background: "#000000",      // painted behind every window
+});
 
-  spawn_at_startup = {
-    -- { exec = { "waybar" } },
-    -- { shell = "wl-paste --watch cliphist store" },
-  },
+// Every action is spelled as in `poly msg action …`; see `docs/config.md` for
+// the full list. `bind(keys, action)` also takes an options object as a third
+// argument, e.g. `{ repeat: false }`.
+bind("Mod+Return", { spawn: ["foot"] });
+bind("Mod+Q", "close-window");
+bind("Mod+Space", "toggle-floating");
+bind("Mod+F", "toggle-fullscreen");
+bind("Mod+Tab", "cycle-layout");
+bind("Mod+Left", "focus-left");
+bind("Mod+Right", "focus-right");
+bind("Mod+Up", "focus-up");
+bind("Mod+Down", "focus-down");
+bind("Mod+Shift+Left", "move-window-left");
+bind("Mod+Shift+Right", "move-window-right");
+// Workspaces: one vertical stack per output.
+bind("Mod+Page_Up", "focus-workspace-up");
+bind("Mod+Page_Down", "focus-workspace-down");
+bind("Mod+1", { focus_workspace: 1 });
+bind("Mod+2", { focus_workspace: 2 });
+bind("Mod+3", { focus_workspace: 3 });
+bind("Mod+O", "toggle-overview");
+bind("Mod+R", "reload-config");
+// Mouse bindings move and resize windows.
+bind("Mod+MouseLeft", "move-window");
+bind("Mod+MouseRight", "resize-window");
+// Media keys are passed through by `xkb`; bind them here when the session does
+// not have a separate daemon.
+// bind("XF86AudioRaiseVolume",
+//      { spawn: ["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "5%+"] });
 
-  -- Environment for every child poly spawns.
-  environment = {
-    -- MOZ_ENABLE_WAYLAND = "1",
-  },
+// Programs started once the compositor is up. A string runs through the shell;
+// an object form is `{ exec: [ … ] }` or `{ shell: "…" }`.
+// startup("waybar");
+// startup({ exec: ["wl-paste", "--watch", "cliphist", "store"] });
 
-  -- Problems always appear as on-screen Toasts; set this to also send them to
-  -- the desktop notification daemon (needs a build with the `dbus` feature).
-  errors = { dbus = false },
+// Environment for every child poly spawns.
+// env("MOZ_ENABLE_WAYLAND", "1");
 
-  -- X11 clients (xterm, Steam, ...) run through xwayland-satellite. X11 is
-  -- only started when an X11 program connects; every child poly spawns from
-  -- then on gets `DISPLAY` set. Set `enable = false` for a Wayland-only
-  -- session, or `on_demand = false` to keep the satellite running.
-  xwayland = {
-    enable = true,
-    satellite_path = "xwayland-satellite",
-    on_demand = true,
-    spawn_at_startup = false,
-  },
-
-  -- Lua layouts: `ctx` carries the output work area, the workspace id and the
-  -- windows in order; the return value maps window ids to geometry. A layout
-  -- table can also declare `actions`, per-layout `keybinds` and an `insert`
-  -- hook (`docs/config.md`).
-  -- layouts = {
-  --   columns = function(ctx)
-  --     local wa, n, out = ctx.output.work_area, #ctx.windows, {}
-  --     local cw = math.floor((wa.w - (n - 1) * poly.gap) / math.max(n, 1))
-  --     for i, w in ipairs(ctx.windows) do
-  --       out[w.id] = { x = wa.x + (i - 1) * (cw + poly.gap), y = wa.y, w = cw, h = wa.h }
-  --     end
-  --     return out
-  --   end,
-  -- },
-  -- default_layout = "columns",
-}
+// JavaScript layouts: `ctx` carries the output work area, the workspace id and
+// the windows in order; the return value maps window ids to geometry. A layout
+// definition object can also declare `actions`, per-layout `keybinds` and an
+// `insert` hook (`docs/config.md`).
+// layout("columns", ctx => {
+//   const wa = ctx.output.work_area;
+//   const n = ctx.windows.length;
+//   const cw = Math.floor((wa.w - (n - 1) * ctx.gap) / Math.max(n, 1));
+//   const out = {};
+//   ctx.windows.forEach((window, i) => {
+//     out[window.id] = { x: wa.x + i * (cw + ctx.gap), y: wa.y, w: cw, h: wa.h };
+//   });
+//   return out;
+// });
+// default_layout("columns");
 "##;
 
 /// Write the default configuration for `source`, if it has no file yet.
@@ -211,10 +211,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("poly-default-parse-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.lua");
+        let path = dir.join("config.js");
         fs::write(&path, DEFAULT_CONFIG).unwrap();
 
-        let result = crate::lua::load_file(&path);
+        let result = crate::load_file(&path);
         let config = match result.config {
             Ok(config) => config,
             Err(err) => panic!("the default configuration does not load: {err}"),
@@ -232,12 +232,12 @@ mod tests {
     fn writing_happens_only_when_the_file_is_missing() {
         let dir = std::env::temp_dir().join(format!("poly-default-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let path = dir.join("poly").join("config.lua");
+        let path = dir.join("poly").join("config.js");
 
         let written = write_default(&ConfigSource::Default(Some(path.clone()))).unwrap();
         assert_eq!(written, Some(path.clone()));
         let text = fs::read_to_string(&path).unwrap();
-        assert!(text.contains("return {"), "{text}");
+        assert!(text.contains("config({"), "{text}");
 
         // A second run finds the file and leaves it alone.
         let again = write_default(&ConfigSource::User(path.clone())).unwrap();

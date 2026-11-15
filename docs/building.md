@@ -14,8 +14,8 @@ see [ipc.md](ipc.md).
   operating systems are not supported.
 - Rust 1.87 or newer with Cargo. The repository's `rust-toolchain.toml` selects
   the stable toolchain and requests `rustfmt` and `clippy` when using rustup.
-- A C compiler and `pkg-config`. The Lua runtime is built from source, and the
-  native libraries are found through pkg-config.
+- A C compiler and `pkg-config`. The QuickJS runtime is built from source, and
+  the native libraries are found through pkg-config.
 - Development headers for the libraries listed below.
 - A working EGL/GLES driver for the `winit` and `udev` backends. The `headless`
   backend does not need a GPU.
@@ -217,20 +217,20 @@ once X11 is available, `DISPLAY`.
 
 ## First run and configuration
 
-Poly looks for `config.lua` in the usual locations and creates an annotated
+Poly looks for `config.js` in the usual locations and creates an annotated
 default file when none exists. Check the resolved file without starting the
 compositor:
 
 ```sh
 target/release/poly validate
-target/release/poly validate --config ./config.lua
+target/release/poly validate --config ./config.js
 ```
 
 The lookup order and every setting are documented in [config.md](config.md).
 Pass `--config` to the compositor to use a specific file:
 
 ```sh
-target/release/poly --config ./config.lua --backend winit
+target/release/poly --config ./config.js --backend winit
 ```
 
 Configuration errors are collected, logged and shown as Toasts. A failed reload

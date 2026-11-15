@@ -62,7 +62,7 @@ impl Drop for Unlink {
 ///
 /// The satellite program is looked up in `PATH` when it is a bare name, so this
 /// deliberately does not resolve relative paths against the configuration file
-/// the way `poly.include` does.
+/// the way `include()` does.
 pub(crate) fn expand_tilde(path: &str) -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
         if path == "~" {

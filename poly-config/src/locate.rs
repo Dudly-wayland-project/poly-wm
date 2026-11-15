@@ -1,7 +1,7 @@
 //! Config file discovery.
 //!
-//! Order: `--config` > `$POLY_CONFIG` > `$XDG_CONFIG_HOME/poly/config.lua`
-//! (default `~/.config/poly/config.lua`) > `/etc/poly/config.lua`.
+//! Order: `--config` > `$POLY_CONFIG` > `$XDG_CONFIG_HOME/poly/config.js`
+//! (default `~/.config/poly/config.js`) > `/etc/poly/config.js`.
 
 use std::path::{Path, PathBuf};
 
@@ -16,7 +16,7 @@ pub enum ConfigSource {
     Env(PathBuf),
     /// User config under XDG config home.
     User(PathBuf),
-    /// System-wide `/etc/poly/config.lua`.
+    /// System-wide `/etc/poly/config.js`.
     System(PathBuf),
     /// No config file found; built-in defaults apply. Carries the user path
     /// that would be watched/created.
@@ -105,7 +105,7 @@ pub(crate) fn locate_with(cli: Option<&Path>, env: &dyn Env) -> Result<ConfigSou
             });
         })
         .map(|dir| {
-            return dir.join("poly").join("config.lua");
+            return dir.join("poly").join("config.js");
         });
 
     if let Some(user) = &user
@@ -114,7 +114,7 @@ pub(crate) fn locate_with(cli: Option<&Path>, env: &dyn Env) -> Result<ConfigSou
         return Ok(ConfigSource::User(user.clone()));
     }
 
-    let system = PathBuf::from("/etc/poly/config.lua");
+    let system = PathBuf::from("/etc/poly/config.js");
     if env.exists(&system) {
         return Ok(ConfigSource::System(system));
     }
@@ -149,35 +149,35 @@ mod tests {
     #[test]
     fn cli_takes_precedence() {
         let mut env = FakeEnv::default();
-        env.vars.insert("POLY_CONFIG", "/env.lua");
-        env.files.insert("/env.lua".into());
-        env.files.insert("/cli.lua".into());
-        let got = locate_with(Some(Path::new("/cli.lua")), &env).unwrap();
-        assert_eq!(got, ConfigSource::Cli("/cli.lua".into()));
+        env.vars.insert("POLY_CONFIG", "/env.js");
+        env.files.insert("/env.js".into());
+        env.files.insert("/cli.js".into());
+        let got = locate_with(Some(Path::new("/cli.js")), &env).unwrap();
+        assert_eq!(got, ConfigSource::Cli("/cli.js".into()));
     }
 
     #[test]
     fn missing_explicit_path_is_error() {
         let env = FakeEnv::default();
-        assert!(locate_with(Some(Path::new("/nope.lua")), &env).is_err());
+        assert!(locate_with(Some(Path::new("/nope.js")), &env).is_err());
     }
 
     #[test]
     fn xdg_then_home_then_system() {
         let mut env = FakeEnv::default();
         env.vars.insert("HOME", "/home/u");
-        env.files.insert("/home/u/.config/poly/config.lua".into());
+        env.files.insert("/home/u/.config/poly/config.js".into());
         let got = locate_with(None, &env).unwrap();
         assert_eq!(
             got,
-            ConfigSource::User("/home/u/.config/poly/config.lua".into())
+            ConfigSource::User("/home/u/.config/poly/config.js".into())
         );
 
         let mut env = FakeEnv::default();
         env.vars.insert("XDG_CONFIG_HOME", "/xdg");
-        env.files.insert("/etc/poly/config.lua".into());
+        env.files.insert("/etc/poly/config.js".into());
         let got = locate_with(None, &env).unwrap();
-        assert_eq!(got, ConfigSource::System("/etc/poly/config.lua".into()));
+        assert_eq!(got, ConfigSource::System("/etc/poly/config.js".into()));
     }
 
     #[test]
@@ -187,7 +187,7 @@ mod tests {
         let got = locate_with(None, &env).unwrap();
         assert_eq!(
             got,
-            ConfigSource::Default(Some("/xdg/poly/config.lua".into()))
+            ConfigSource::Default(Some("/xdg/poly/config.js".into()))
         );
         assert!(got.path().is_none());
     }

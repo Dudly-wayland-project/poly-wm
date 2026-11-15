@@ -17,7 +17,7 @@ const DEFAULT_LOG_FILTER: &str = "poly=debug,smithay=warn,info";
 #[command(
     name = "poly",
     version,
-    about = "A Wayland compositor with Lua-scriptable layouts"
+    about = "A Wayland compositor with JavaScript-scriptable layouts"
 )]
 #[command(args_conflicts_with_subcommands = true)]
 struct Cli {
@@ -35,7 +35,7 @@ pub struct RunArgs {
     #[arg(long, value_enum, default_value_t = BackendKind::Auto)]
     pub backend: BackendKind,
 
-    /// Path to config.lua (overrides $POLY_CONFIG and the XDG lookup).
+    /// Path to config.js (overrides $POLY_CONFIG and the XDG lookup).
     #[arg(short, long)]
     pub config: Option<PathBuf>,
 
@@ -133,7 +133,7 @@ enum Msg {
     FocusedOutput,
     /// Print the state of the XWayland integration (`xwayland-satellite`).
     Xwayland,
-    /// Run an action, spelled as in `config.lua`.
+    /// Run an action, spelled as in `config.js`.
     ///
     /// `poly msg action focus-workspace 2`, `poly msg action -- spawn foot -e top`.
     Action {

@@ -1,6 +1,6 @@
 [package]
 name = "poly-config"
-description = "Lua configuration types and loader for the Poly compositor"
+description = "JavaScript configuration types and loader for the Poly compositor"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,7 +10,9 @@ authors.workspace = true
 
 [dependencies]
 bitflags = "2"
-mlua = { version = "0.12", features = ["lua54", "vendored"] }
+# QuickJS bindings; the crate ships the C sources, so no system QuickJS and no
+# bindgen are needed.
+rquickjs = { version = "0.14", features = ["std"] }
 poly-ipc = { path = "../poly-ipc" }
 thiserror.workspace = true
 tracing.workspace = true

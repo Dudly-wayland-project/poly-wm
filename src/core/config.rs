@@ -1,7 +1,7 @@
 //! Configuration lifecycle inside the compositor: the startup load, problem
 //! reporting and `reload-config`.
 //!
-//! The Lua loader itself lives in the `poly-config` crate; this module is the
+//! The script loader itself lives in the `poly-config` crate; this module is the
 //! compositor-side half. Loading never fails startup: a broken file means the
 //! built-in defaults plus errors in the log and on-screen Toasts carrying the
 //! same messages.

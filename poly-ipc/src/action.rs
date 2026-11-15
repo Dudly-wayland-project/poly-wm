@@ -1,6 +1,6 @@
 //! The compositor action vocabulary.
 //!
-//! Keybindings (Lua), IPC requests and `poly msg action` all speak this single
+//! Keybindings (JavaScript), IPC requests and `poly msg action` all speak this single
 //! set of actions (`AGENTS.md` §2.6). `FromStr` accepts the kebab-case spelling
 //! used in configuration files; serde (used by the IPC protocol) serialises the
 //! variants as they are named in Rust.
@@ -105,7 +105,7 @@ pub enum Action {
     /// Show or hide the workspace overview.
     ToggleOverview,
 
-    /// Invoke an action declared by the active workspace's Lua layout.
+    /// Invoke an action declared by the active workspace's JavaScript layout.
     ///
     /// Layouts declare their own action names and handlers, so this variant is
     /// the one stable spelling the IPC protocol and global keybindings use.
@@ -337,16 +337,16 @@ impl FromStr for Action {
         }
 
         // Actions that carry an argument cannot come from a bare string; the
-        // Lua loader accepts tables for those (`{ spawn = { "foot" } }`).
+        // configuration loader accepts objects for those (`{ spawn: ["foot"] }`).
         let err = match s {
-            "spawn" => Some("use { spawn = { \"command\", \"arg\" } }"),
+            "spawn" => Some("use { spawn: [\"command\", \"arg\"] }"),
             "spawn-shell" => Some("use { spawn_shell = \"command line\" }"),
-            "set-layout" => Some("use { set_layout = \"name\" }"),
-            "focus-workspace" => Some("use { focus_workspace = 2 }"),
-            "focus-window" => Some("use { focus_window = 3 }, or `poly msg action focus-window 3`"),
-            "move-window-to-workspace" => Some("use { move_window_to_workspace = 2 }"),
+            "set-layout" => Some("use { set_layout: \"name\" }"),
+            "focus-workspace" => Some("use { focus_workspace: 2 }"),
+            "focus-window" => Some("use { focus_window: 3 }, or `poly msg action focus-window 3`"),
+            "move-window-to-workspace" => Some("use { move_window_to_workspace: 2 }"),
             "layout-action" => Some(
-                "use { layout_action = { \"name\", \"arg\" } }, or `poly msg action layout-action name`",
+                "use { layout_action: [\"name\", \"arg\"] }, or `poly msg action layout-action name`",
             ),
             _ => None,
         };

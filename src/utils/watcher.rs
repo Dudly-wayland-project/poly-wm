@@ -6,7 +6,7 @@
 //! awkward, and adds one `stat` per file per half second.
 //!
 //! What is watched is the *include closure*: the root file plus every file
-//! `poly.include` pulled in, because editing a theme file has to reload just
+//! `include()` pulled in, because editing a theme file has to reload just
 //! like editing the root file does. The closure is rebuilt after every load, so
 //! an include that is added or removed follows along.
 
@@ -118,7 +118,7 @@ mod tests {
     #[test]
     fn unchanged_files_report_nothing() {
         let dir = TempFile::new("unchanged");
-        let root = dir.write("config.lua", "return {}");
+        let root = dir.write("config.js", "config({})");
         let mut watcher = ConfigWatcher::default();
         watcher.watch(vec![root.clone()]);
         assert_eq!(watcher.changed(), None);
@@ -128,7 +128,7 @@ mod tests {
     #[test]
     fn an_edited_file_is_reported_once() {
         let dir = TempFile::new("edited");
-        let root = dir.write("config.lua", "return {}");
+        let root = dir.write("config.js", "config({})");
         let mut watcher = ConfigWatcher::default();
         watcher.watch(vec![root.clone()]);
 
@@ -141,8 +141,8 @@ mod tests {
     #[test]
     fn an_include_is_watched_too() {
         let dir = TempFile::new("include");
-        let root = dir.write("config.lua", "return {}");
-        let theme = dir.write("theme.lua", "return {}");
+        let root = dir.write("config.js", "config({})");
+        let theme = dir.write("theme.js", "config({})");
         let mut watcher = ConfigWatcher::default();
         watcher.watch(vec![root.clone(), theme.clone()]);
         assert_eq!(watcher.paths().count(), 2);
@@ -154,14 +154,14 @@ mod tests {
     #[test]
     fn a_file_that_appears_is_a_change() {
         let dir = TempFile::new("created");
-        let missing = dir.path("config.lua");
+        let missing = dir.path("config.js");
         let mut watcher = ConfigWatcher::default();
         watcher.watch(vec![missing.clone()]);
         assert_eq!(watcher.changed(), None);
 
         // Creating the file counts as a change, which is how a configuration
         // written while poly runs gets picked up.
-        dir.write("config.lua", "return {}");
+        dir.write("config.js", "config({})");
         assert_eq!(watcher.changed(), Some(missing));
     }
 }

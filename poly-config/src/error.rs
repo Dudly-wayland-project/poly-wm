@@ -8,7 +8,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigMessage {
     /// Path of the setting, like `keybinds["Mod+Q"]` or `input.keyboard.layout`.
-    /// Empty for whole-file problems (a Lua error, a missing include file).
+    /// Empty for whole-file problems (a script error, a missing include file).
     pub path: String,
     /// What is wrong.
     pub message: String,
@@ -54,8 +54,8 @@ impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "error loading config {}:", self.source.display())?;
         for message in &self.messages {
-            // A message can span lines (a Lua traceback); indent the rest so
-            // the list stays readable.
+            // A message can span lines (a JavaScript stack trace); indent the
+            // rest so the list stays readable.
             let text = message.to_string();
             let mut lines = text.lines();
             let first = lines.next().unwrap_or("");
@@ -137,7 +137,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn paths_look_like_lua() {
+    fn paths_look_like_javascript() {
         assert_eq!(path_key("input", "keyboard"), "input.keyboard");
         assert_eq!(path_key("keybinds", "Mod+Q"), r#"keybinds["Mod+Q"]"#);
         assert_eq!(path_key("", "general"), "general");
@@ -147,10 +147,10 @@ mod tests {
     #[test]
     fn error_display_lists_messages() {
         let err = ConfigError {
-            source: PathBuf::from("/tmp/config.lua"),
+            source: PathBuf::from("/tmp/config.js"),
             messages: vec![
                 ConfigMessage::new("keybinds[\"Mod+Q\"]", "invalid key: Q"),
-                ConfigMessage::file("include chain: a.lua -> b.lua -> a.lua"),
+                ConfigMessage::file("include chain: a.js -> b.js -> a.js"),
             ],
         };
         let text = err.to_string();

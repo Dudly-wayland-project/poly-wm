@@ -1,6 +1,6 @@
 # Poly
 
-**A Wayland compositor/window manager written in Rust + [Smithay](https://github.com/Smithay/smithay): layouts are done in Lua, still a bit rough around the edges.**
+**A Wayland compositor/window manager written in Rust + [Smithay](https://github.com/Smithay/smithay): layouts are done in JavaScript, still a bit rough around the edges.**
 
 ## Documentation
 

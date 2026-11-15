@@ -5,8 +5,8 @@
 //! This module is the compositor's source of truth for where a mapped window
 //! is: whether it is tiled or floating, which output it belongs to, its
 //! target rectangle and the animation towards that rectangle. The built-in
-//! fallback is a row of equal-width columns; named Lua layouts replace it per
-//! output when configured.
+//! fallback is a row of equal-width columns; named scripted layouts replace it
+//! per output when configured.
 //!
 //! Geometry changes go through a configure transaction: the old size stays on
 //! screen until every client in the reflow acknowledged its new size, so a
@@ -55,7 +55,7 @@ pub enum FullscreenMode {
 
 /// A mapped window and the state the layout engine owns for it.
 pub struct ManagedWindow {
-    /// Stable id, also used by the Lua layout bridge.
+    /// Stable id, also used by the scripted layout bridge.
     pub id: u64,
     /// The window itself.
     pub window: Window,
@@ -319,7 +319,7 @@ impl ClosingWindow {
 /// the keyboard when the workspace was left, so coming back restores it.
 #[derive(Debug, Default)]
 struct Workspace {
-    /// Stable id handed to Lua as `ctx.workspace.id` (0 until assigned).
+    /// Stable id handed to scripts as `ctx.workspace.id` (0 until assigned).
     ///
     /// Ids follow a workspace when it moves in the stack, so a layout can keep
     /// per-workspace state across `move-workspace-up`/`-down`.
@@ -718,7 +718,8 @@ pub struct LayoutManager {
 }
 
 impl LayoutManager {
-    /// Create the manager from the initial configuration and its Lua programs.
+    /// Create the manager from the initial configuration and its scripted
+    /// layouts.
     pub fn new(config: &Config, programs: Option<LayoutPrograms>) -> Self {
         return Self {
             windows: HashMap::new(),
@@ -752,7 +753,7 @@ impl LayoutManager {
         };
     }
 
-    /// Install a reloaded configuration (and its new Lua state).
+    /// Install a reloaded configuration (and its new script state).
     pub fn set_config(&mut self, config: &Config, programs: Option<LayoutPrograms>) {
         self.programs = programs;
         self.layout_names = config
@@ -1175,9 +1176,10 @@ impl LayoutManager {
         let id = state.core.layout.next_id;
         state.core.layout.next_id = state.core.layout.next_id.wrapping_add(1).max(1);
 
-        // A Lua layout may decide where a new tiled window belongs (niri's
-        // `insert` hook). The hook sees the workspace without the new window
-        // and returns a 1-based position; the compositor keeps the order.
+        // A scripted layout may decide where a new tiled window belongs
+        // (niri's `insert` hook). The hook sees the workspace without the new
+        // window and returns a 1-based position; the compositor keeps the
+        // order.
         let insert_at = if floating {
             None
         } else {
@@ -1378,7 +1380,7 @@ impl LayoutManager {
     /// windows keep a gap from the screen edges (or from a bar's exclusive
     /// zone) exactly like they keep one from each other. Layouts receive this
     /// already-inset rectangle as `ctx.output.work_area`; window-to-window
-    /// spacing stays the layout's job (`poly.gap`).
+    /// spacing stays the layout's job (`ctx.gap`).
     pub fn layout_area(
         state: &State,
         output: &smithay::output::Output,
@@ -1510,19 +1512,19 @@ impl LayoutManager {
             return desired;
         };
 
-        let mut lua_result = None;
-        let mut lua_error = None;
+        let mut script_result = None;
+        let mut script_error = None;
         // The built-in `columns` stack is not a `LayoutProgram`: only
-        // ask the Lua bridge when the workspace really names one.
+        // ask the script bridge when the workspace really names one.
         if let Some(programs) = &state.core.layout.programs {
             if programs.has(&layout_name) {
                 match programs.arrange(&layout_name, &context) {
-                    Ok(result) => lua_result = Some(result),
-                    Err(err) => lua_error = Some(err.to_string()),
+                    Ok(result) => script_result = Some(result),
+                    Err(err) => script_error = Some(err.to_string()),
                 }
             }
         }
-        if let Some(message) = lua_error {
+        if let Some(message) = script_error {
             let key = format!("error:{}:{index}:{layout_name}", output.name());
             if state.core.layout.warned.insert(key) {
                 warn!(
@@ -1533,8 +1535,8 @@ impl LayoutManager {
         }
 
         let handles_fullscreen =
-            state.core.layout.handles_fullscreen(&layout_name) && lua_result.is_some();
-        if let Some(result) = &lua_result {
+            state.core.layout.handles_fullscreen(&layout_name) && script_result.is_some();
+        if let Some(result) = &script_result {
             let expected = context.windows.iter().map(|window| return window.id);
             for id in expected {
                 let key = format!("missing:{}:{index}:{layout_name}:{id}", output.name());
@@ -1558,14 +1560,14 @@ impl LayoutManager {
                 continue;
             };
             let rect = if window.fullscreen == Some(FullscreenMode::Fullscreen) {
-                match lua_result
+                match script_result
                     .as_ref()
                     .and_then(|result| return result.get(&id))
                 {
                     Some(rect) if handles_fullscreen => from_layout_rect(*rect),
                     _ => output_rect,
                 }
-            } else if let Some(rect) = lua_result
+            } else if let Some(rect) = script_result
                 .as_ref()
                 .and_then(|result| return result.get(&id))
             {
@@ -1634,7 +1636,7 @@ impl LayoutManager {
         };
     }
 
-    /// Build the Lua context for one workspace.
+    /// Build the script context for one workspace.
     ///
     /// Returns the context plus the workspace's tiled and floating lists and
     /// its layout name, which the arrange loop needs after the call.
@@ -1907,8 +1909,8 @@ impl LayoutManager {
     /// Invoke an action declared by the active workspace's layout.
     ///
     /// Layout keybindings and IPC both land here. The handler runs against the
-    /// same per-layout Lua state as `arrange`, and its effects are applied by
-    /// the compositor rather than by Lua directly.
+    /// same per-layout state as `arrange`, and its effects are applied by the
+    /// compositor rather than by the script directly.
     pub fn run_layout_action(state: &mut State, name: &str, args: &[String]) {
         let Some(output) = Self::active_output(state) else {
             warn!("layout action {name:?}: there is no output");
@@ -1928,7 +1930,7 @@ impl LayoutManager {
             return;
         };
         let Some(programs) = state.core.layout.programs.as_ref() else {
-            warn!("layout action {name:?}: no Lua layouts are configured");
+            warn!("layout action {name:?}: no scripted layouts are configured");
             return;
         };
         if !programs.has(&layout_name) {
@@ -2507,11 +2509,11 @@ impl LayoutManager {
     /// Called once per event-loop iteration.
     pub fn tick(state: &mut State) {
         let now = Instant::now();
-        // Layout handlers call `poly.layout.relayout()` when they changed state
-        // that only `arrange` can see. Consume the request here instead of
-        // arranging directly from Lua. Clear it again afterwards: an `arrange`
-        // that calls `relayout()` is already laying out and must not queue a
-        // new frame forever.
+        // Layout handlers call `ctx.relayout()` when they changed state that
+        // only `arrange` can see. Consume the request here instead of arranging
+        // directly from the script. Clear it again afterwards: an `arrange` that
+        // calls `relayout()` is already laying out and must not queue a new
+        // frame forever.
         let relayout_requested = state
             .core
             .layout
@@ -3949,7 +3951,7 @@ pub(crate) fn focused_id(state: &State) -> Option<u64> {
 /// Windows are read in row-major order. The drop target is the nearest window;
 /// the pointer's dominant normalized offset from its centre decides whether the
 /// dragged window goes before or after it. This works for the fallback columns
-/// and for Lua grids without knowing the layout algorithm.
+/// and for scripted grids without knowing the layout algorithm.
 fn insertion_index(
     state: &State,
     output: &smithay::output::Output,

@@ -58,3 +58,11 @@ David Hoskins — "Hash without Sine" (https://www.shadertoy.com/view/4djSRW)
   Copied:
     src/core/render/shaders/blur_main.frag      <- poly_hash12()
     src/core/render/shaders/include/noise.glsl  <- poly_hash12() / poly_noise()
+
+QuickJS / rquickjs — https://github.com/quickjs-ng/quickjs, https://github.com/DelSkayn/rquickjs
+  Copyright (c) Fabrice Bellard, Charlie Gordon and the QuickJS contributors;
+  rquickjs copyright (c) DelSkayn and contributors
+  License: MIT
+  Used as a compiled dependency (not vendored):
+    rquickjs  -> links QuickJS, the JavaScript engine used by poly-config
+                 (poly-config/src/js/) for configuration and layout scripts

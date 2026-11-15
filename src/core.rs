@@ -132,7 +132,7 @@ pub struct Core {
 
     /// The loaded configuration.
     pub config: Config,
-    /// Mapped-window state, per-output tiling and the Lua layout bridge.
+    /// Mapped-window state, per-output tiling and the scripted layout bridge.
     pub layout: crate::core::layout::LayoutManager,
     /// Where the configuration came from (`reload-config`, the file watcher).
     pub config_source: ConfigSource,

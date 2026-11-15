@@ -53,7 +53,7 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
     // errors in the log.
     let mut config_source = poly_config::locate_config(args.config.as_deref())?;
     // A first run has nothing to edit: write the annotated template so that
-    // "edit `~/.config/poly/config.lua`" is true, and load it right away
+    // "edit `~/.config/poly/config.js`" is true, and load it right away
     // instead of the built-in defaults.
     let generated = crate::core::config::write_default_if_missing(&config_source)?;
     if generated.is_some() {
@@ -66,7 +66,7 @@ pub fn run(args: RunArgs) -> anyhow::Result<()> {
     let config_notifications = loaded.error_notifications;
     let config = loaded.config.unwrap_or_default();
     let layout_programs = loaded.layout_programs;
-    // The `poly.include` closure, so the watcher knows which files to stat.
+    // Every file the load touched, so the watcher knows which files to stat.
     let config_includes = loaded.includes;
     match config_source.path() {
         Some(path) => info!("configuration: {}", path.display()),

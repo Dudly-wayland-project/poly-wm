@@ -10,13 +10,14 @@ keep them stable when editing this file.
 - Read the surrounding module before changing it. Most subsystems have a module
   comment explaining the invariants and the niri/Smithay code they were adapted
   from.
-- `poly-ipc/src/action.rs` is the only action vocabulary. Lua keybindings, IPC
-  and `poly msg action` all derive from it.
+- `poly-ipc/src/action.rs` is the only action vocabulary. JavaScript
+  keybindings, IPC and `poly msg action` all derive from it.
 - `poly-ipc/src/protocol.rs` is the wire format. `docs/ipc.md` must describe
   what that file actually serializes.
 - `poly-config/src/config.rs` defines the configuration data model;
-  `poly-config/src/lua.rs` and `poly-config/src/layout.rs` parse it.
-  `docs/config.md` must stay in sync with both.
+  `poly-config/src/js/` executes the script (`builder.rs`), validates the tree
+  (`parse.rs`) and bridges layouts (`layout.rs`). `docs/config.md` must stay in
+  sync with all three.
 - The maintained documentation is `docs/config.md`, `docs/ipc.md`,
   `docs/building.md`, `docs/installing.md` and this guide.
 
@@ -57,8 +58,9 @@ pass it through the existing backend/core API.
 
 ### 2.4 Threads and the event loop
 
-The compositor state, Smithay renderer, libinput devices and Lua VM are not
-`Send`. Keep compositor work on the main thread inside the calloop event loop.
+The compositor state, Smithay renderer, libinput devices and QuickJS runtime are
+not `Send`. Keep compositor work on the main thread inside the calloop event
+loop.
 Background threads are limited to self-contained helpers that return owned data;
 do not hold a `&mut State` across a thread or block the event loop on I/O.
 
@@ -67,16 +69,17 @@ refresh capture sessions, clean up popups and locks, update keyboard focus, send
 IPC diffs, then render and flush clients. If you add periodic work, put it in the
 right place rather than adding a second timer with fuzzy ordering.
 
-### 2.5 Lua is thread-bound
+### 2.5 JavaScript is thread-bound
 
-The Lua state lives in `LayoutPrograms`, uses `Rc`, and must only be touched
-from the compositor thread. `poly-config` exposes parsed functions through
-`LayoutPrograms`; do not move Lua values into a thread pool or a `Send` future.
-Configuration setup, layout calls and `poly.include` all run through the same
-VM.
+The QuickJS runtime lives in `LayoutPrograms`, uses `Rc`, and must only be
+touched from the compositor thread. Layout functions are `Persistent` handles
+restored for each call, and every handle must be released while the context is
+still alive. `poly-config` exposes parsed functions through `LayoutPrograms`; do
+not move JavaScript values into a thread pool or a `Send` future. Configuration
+load, layout calls and `include()` all run through the same context.
 
 Layouts are called synchronously during arrangement. They must not block, spawn
-threads or retain compositor-owned references outside the VM.
+threads or retain compositor-owned references outside the context.
 
 ### 2.6 One action vocabulary
 
@@ -90,23 +93,24 @@ Every action lives in `poly-ipc::Action`. When adding or changing one:
 6. Add parser and round-trip tests.
 7. Update `docs/config.md` and `docs/ipc.md`.
 
-Never add a Lua-only action or a CLI-only alias that bypasses this enum. The
-JSON variant names and the kebab-case names are intentionally different; keep
-both stable.
+Never add a configuration-only action or a CLI-only alias that bypasses this
+enum. The JSON variant names and the kebab-case names are intentionally
+different; keep both stable.
 
-### 2.7 Treat Lua as untrusted
+### 2.7 Treat JavaScript as untrusted
 
 Configuration and layout scripts can contain accidental infinite loops or huge
-allocations. They are bounded by instruction budgets:
+allocations. They are bounded by wall-clock and memory budgets:
 
-- 20,000,000 instructions for configuration loading;
-- 200,000 instructions per `arrange` call;
+- 1 second for a whole configuration load (root, includes and theme);
+- 10 ms per layout call (`setup`, `arrange`, an action or `insert`);
+- 64 MiB of QuickJS memory and a 1 MiB stack;
 - a maximum include depth of 32.
 
 Do not remove or bypass these limits, add blocking host functions, or expose
-arbitrary filesystem or process APIs to Lua. The only file helpers are
-`poly.include` and `poly.read_file`; process launching goes through the action
-vocabulary. A timeout or budget error must leave the compositor responsive and
+arbitrary filesystem or process APIs to scripts. The only file helpers are
+`include()` and `read_file()`; process launching goes through the action
+vocabulary. A timeout or memory error must leave the compositor responsive and
 fall back to the previous configuration or the built-in column layout.
 
 ### 2.8 Report errors at the right level
@@ -216,14 +220,14 @@ src/main.rs, cli.rs
 - `src/core/handlers/` implements Wayland protocol handlers; `handlers.rs`
   registers them with `delegate_dispatch2!(State)`.
 - `src/core/layout/` owns window placement, transactions, overview and the
-  column fallback. Lua layouts return rectangles through `LayoutPrograms`;
-  they do not mutate state directly.
+  column fallback. JavaScript layouts return rectangles through
+  `LayoutPrograms`; they do not mutate state directly.
 - `src/core/render/` builds and draws the scene: window visuals, decorations,
   blur, shadows and custom shaders.
 - `src/core/ipc/` serves the socket and diffs state into events. The wire types
   and client live in `poly-ipc`.
-- `poly-config/` locates, parses and validates Lua configuration; it also owns
-  the embedded default config and layout execution.
+- `poly-config/` locates, executes, parses and validates JavaScript
+  configuration; it also owns the embedded default config and layout execution.
 - `poly-ipc/` contains `Action`, `Request`/`Response`/`Event`, the event-stream
   state model and the blocking client.
 - `tools/capture-bench/` is a separate benchmark tool, not part of the
@@ -278,8 +282,9 @@ For a new configuration field:
 
 1. Add the field and default to the matching type in
    `poly-config/src/config.rs`.
-2. Parse it in `lua.rs` or `layout.rs`, with an unknown-key list and range
-   validation.
+2. Parse it in `js/parse.rs`, or add a global helper in `js/builder.rs` when it
+   is registered as a function rather than read from `config()`. Give it an
+   unknown-key list and range validation.
 3. Wire it into the consumer (`src/core/...`) rather than leaving a parsed but
    unused field.
 4. Update `poly-config/src/default_config.rs` if the annotated default file
