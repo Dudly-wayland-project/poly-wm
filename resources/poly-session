@@ -1,0 +1,167 @@
+#!/bin/sh
+# poly-session - start Poly as a Wayland session.
+#
+# Installed next to the compositor and referenced by
+# /usr/share/wayland-sessions/poly.desktop, so a display manager can start Poly
+# from the login screen. It also works from a free TTY:
+#
+#     poly-session
+#
+# The compositor runs in the foreground. This script only prepares the session
+# environment: it provides a D-Bus session bus when there is none and publishes
+# the Wayland socket to the systemd user manager, so that portals and user
+# services can reach the compositor. It always uses the udev backend, because it
+# is started for a real seat rather than nested in another desktop.
+
+set -eu
+
+if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+    echo "poly-session: XDG_RUNTIME_DIR is not set; start this from a login session" >&2
+    exit 1
+fi
+
+export XDG_SESSION_TYPE=wayland
+# `POLY` matches the name the compositor gives its children and the portal
+# configuration files (`poly-portals.conf`, `xdg-desktop-portal-wlr/POLY`).
+export XDG_SESSION_DESKTOP="${XDG_SESSION_DESKTOP:-POLY}"
+export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-POLY}"
+
+# The session owns the seat. Drop the display variables of a parent session so
+# that nothing inherits a socket that is not ours: `--backend udev` ignores
+# them, but XWayland and the clients would use them.
+unset WAYLAND_DISPLAY WAYLAND_SOCKET DISPLAY POLY_SOCKET
+
+# Prefer the compositor installed next to this script, so that the session does
+# not depend on the display manager's PATH; fall back to `poly` from PATH.
+self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -x "$self_dir/poly" ]; then
+    poly=$self_dir/poly
+else
+    poly=poly
+fi
+if ! command -v "$poly" >/dev/null 2>&1; then
+    echo "poly-session: cannot find the poly binary next to $0 or in PATH" >&2
+    exit 1
+fi
+
+# D-Bus session bus. A display manager and the systemd user manager provide one;
+# a bare TTY does not, and notifications and portals need it. Reuse the systemd
+# bus when it exists, otherwise start a private one that dies with the session.
+bus_pid=
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    if [ -S "$XDG_RUNTIME_DIR/bus" ]; then
+        DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+        export DBUS_SESSION_BUS_ADDRESS
+    elif command -v dbus-daemon >/dev/null 2>&1; then
+        bus=$(dbus-daemon --session --fork --print-address=1 --print-pid=1 2>/dev/null) || bus=
+        if [ -n "$bus" ]; then
+            DBUS_SESSION_BUS_ADDRESS=$(printf '%s\n' "$bus" | sed -n '1p')
+            bus_pid=$(printf '%s\n' "$bus" | sed -n '2p')
+            export DBUS_SESSION_BUS_ADDRESS
+        fi
+    fi
+fi
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    echo "poly-session: no D-Bus session bus; notifications and portals will not work" >&2
+fi
+
+# Wayland socket name, learned from the IPC socket below.
+display=
+# `show-environment` of the systemd user manager before we publish our values.
+prev_env=
+# Non-empty once the session is in the user manager.
+published=
+
+# Undo what this script changed. Runs on every exit path.
+cleanup() {
+    if [ -n "$bus_pid" ]; then
+        kill "$bus_pid" 2>/dev/null || true
+    fi
+    if [ -n "$published" ] && command -v systemctl >/dev/null 2>&1; then
+        # The user manager is shared by every session of this user, so put the
+        # previous values back instead of leaving a socket that no longer
+        # exists. Without it, logging out of Poly would break the portals of a
+        # desktop the user is still logged into.
+        restore_env WAYLAND_DISPLAY
+        restore_env XDG_SESSION_TYPE
+        restore_env XDG_CURRENT_DESKTOP
+        restore_env XDG_SESSION_DESKTOP
+    fi
+}
+
+# Put one variable of the systemd user environment back to its previous value,
+# or remove it when it was not set before.
+restore_env() {
+    value=$(printf '%s\n' "$prev_env" | sed -n "s/^$1=//p" | sed -n '1p')
+    if [ -n "$value" ]; then
+        systemctl --user set-environment "$1=$value" >/dev/null 2>&1 || true
+    else
+        systemctl --user unset-environment "$1" >/dev/null 2>&1 || true
+    fi
+}
+
+"$poly" --backend udev "$@" &
+poly_pid=$!
+
+# Forward termination so that Poly shuts down cleanly and releases the DRM
+# master and the seat. The `wait` in the main path is interrupted by the signal
+# and returns 128+15, so this handler waits for the compositor itself.
+stop() {
+    trap - INT TERM HUP
+    kill "$poly_pid" 2>/dev/null || true
+    wait "$poly_pid" 2>/dev/null || true
+    exit 0
+}
+trap stop INT TERM HUP
+trap cleanup EXIT
+
+# Poly names its IPC socket after the Wayland socket:
+#   $XDG_RUNTIME_DIR/poly.$WAYLAND_DISPLAY.$PID.sock
+# That is the only reliable way to learn the socket name, which `new_auto`
+# picks at runtime.
+i=0
+while [ "$i" -lt 200 ] && [ -z "$display" ]; do
+    for candidate in "$XDG_RUNTIME_DIR"/poly.*."$poly_pid".sock; do
+        if [ -e "$candidate" ]; then
+            display=${candidate##*/poly.}
+            display=${display%."$poly_pid".sock}
+            break
+        fi
+    done
+    if [ -z "$display" ]; then
+        if ! kill -0 "$poly_pid" 2>/dev/null; then
+            # The compositor exited before it created a socket (no seat, broken
+            # configuration, ...): pass its status on.
+            status=0
+            wait "$poly_pid" || status=$?
+            exit "$status"
+        fi
+        sleep 0.05
+        i=$((i + 1))
+    fi
+done
+
+# Publish the session to the systemd user manager and the D-Bus activation
+# environment. Without it, units started later (portals, notification daemons,
+# anything run through `systemctl --user`) would not know where to connect.
+if [ -n "$display" ] && command -v systemctl >/dev/null 2>&1 &&
+    prev_env=$(systemctl --user show-environment 2>/dev/null); then
+    published=1
+    if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+        dbus-update-activation-environment --systemd \
+            "WAYLAND_DISPLAY=$display" \
+            XDG_SESSION_TYPE=wayland \
+            "XDG_CURRENT_DESKTOP=$XDG_CURRENT_DESKTOP" \
+            "XDG_SESSION_DESKTOP=$XDG_SESSION_DESKTOP" >/dev/null 2>&1 || true
+    else
+        systemctl --user set-environment \
+            "WAYLAND_DISPLAY=$display" \
+            XDG_SESSION_TYPE=wayland \
+            "XDG_CURRENT_DESKTOP=$XDG_CURRENT_DESKTOP" \
+            "XDG_SESSION_DESKTOP=$XDG_SESSION_DESKTOP" >/dev/null 2>&1 || true
+    fi
+fi
+
+status=0
+wait "$poly_pid" || status=$?
+exit "$status"

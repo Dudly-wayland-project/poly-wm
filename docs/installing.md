@@ -9,10 +9,19 @@ cargo build --release --locked
 ```
 
 This is a source installation, not a distribution package. It installs the
-executable and, optionally, a configuration file. It does not create a `.deb`
-or `.rpm`, install a display-manager session entry or manage system services.
-For a quick trial run, the binary in `target/release/` can be used directly
-without installing it.
+executable, a session launcher and, optionally, a configuration file. It does
+not create a `.deb` or `.rpm` and does not manage system services. For a quick
+trial run, the binary in `target/release/` can be used directly without
+installing it.
+
+The repository ships a `justfile` for the common cases:
+
+```sh
+just install        # build and install into /usr/local, plus the login entry
+just install-user   # the same under ~/.local, without root
+just build          # release build only
+just check          # fmt, clippy and the test suite
+```
 
 For configuration syntax and runtime control, see [config.md](config.md) and
 [ipc.md](ipc.md).
@@ -105,6 +114,18 @@ sudo install -Dm755 target/release/poly /usr/local/bin/poly
 
 Do not run Cargo itself as root. The release build and the installation step are
 separate.
+
+`just install` runs the release build and the installation steps in one go:
+
+```sh
+just install
+# with desktop notifications:
+just features=dbus install
+```
+
+A custom prefix works with `just prefix=/opt/poly install`. The session launcher
+starts the `poly` binary installed next to it, so the prefix does not have to be
+in `PATH`.
 
 A system-wide configuration is optional. Poly uses `/etc/poly/config.js` only
 when the user has no configuration file:
@@ -207,9 +228,49 @@ seatd, ensure the daemon is running and the user has access to the seat. An SSH
 session does not own a seat and cannot start the udev backend. See
 [building.md](building.md) for the libseat details.
 
-Poly does not install a display-manager session entry or a systemd service.
-Those are desktop integration and packaging concerns. If you need a graphical
-login entry, create it according to your display manager's documentation.
+### Log in from a display manager
+
+`just install` also installs a login-screen entry, so Poly can be started from a
+display manager instead of a TTY:
+
+| File | Purpose |
+| --- | --- |
+| `/usr/local/bin/poly` | the compositor |
+| `/usr/local/bin/poly-session` | session launcher |
+| `/usr/share/wayland-sessions/poly.desktop` | the login entry |
+
+Install only the entry, for a binary that is already installed:
+
+```sh
+just session
+```
+
+The display manager reads that directory from its own configuration. ly, for
+example, uses `waylandsessions` in `/etc/ly/config.ini` (default
+`/usr/share/wayland-sessions`) and writes the session output to
+`~/.local/state/ly-session.log`. The installed entry names the launcher by
+absolute path, so a custom prefix works; a display manager that reads another
+directory needs the entry copied there (`just sessiondir=/path session`).
+
+`poly-session` runs `poly --backend udev` in the foreground and handles the
+session details:
+
+- it reuses the systemd user D-Bus bus (`$XDG_RUNTIME_DIR/bus`) or starts a
+  private `dbus-daemon`, so notifications and portals have a bus;
+- it publishes `WAYLAND_DISPLAY`, `XDG_CURRENT_DESKTOP=POLY`, `XDG_SESSION_DESKTOP`
+  and `XDG_SESSION_TYPE` to the systemd user manager and the D-Bus activation
+  environment, so `systemctl --user` services and portals can reach the
+  compositor, and it puts the previous values back on exit;
+- it forwards `SIGTERM` to the compositor, so logging out releases the DRM
+  master and the seat.
+
+It always uses the udev backend: the entry is for a real seat, not for a nested
+session. Screen sharing still needs `poly portal on`, as noted in
+[building.md](building.md); the launcher only publishes the socket.
+
+A user-local installation cannot log in this way, because display managers do
+not read `~/.local/share/wayland-sessions`. Start `~/.local/bin/poly-session`
+from a free TTY instead; it prepares the same environment.
 
 ## Optional runtime components
 
@@ -250,9 +311,14 @@ install -Dm755 target/release/poly "$HOME/.local/bin/poly"
 For a system-wide installation, use `sudo install ... /usr/local/bin/poly`.
 Check the new version with `poly --version` before starting a session.
 
+With the `justfile`, `just install` or `just install-user` rebuilds and replaces
+the binary, the session launcher and the login entry.
+
 ## Uninstall
 
-Stop Poly, then remove the binary. For a Cargo installation:
+Stop Poly, then remove the binary. `just uninstall` and `just uninstall-user`
+remove the binary, the session launcher and the login entry in one step. For a
+manual removal, start with the binary. For a Cargo installation:
 
 ```sh
 cargo uninstall --root "$HOME/.local" poly
@@ -270,6 +336,12 @@ For a system-wide installation:
 sudo rm /usr/local/bin/poly
 ```
 
+The session launcher and the login entry are separate files:
+
+```sh
+sudo rm /usr/local/bin/poly-session /usr/share/wayland-sessions/poly.desktop
+```
+
 Configuration is user data and is not removed automatically. Remove it only if
 you also want to discard the settings and included files:
 
@@ -283,6 +355,11 @@ sudo rm -rf /etc/poly
 - **`poly: command not found`.** Add `~/.local/bin` to `PATH` in the login-shell
   startup file, or use the absolute path to the binary. Run `hash -r` in the
   current shell after changing `PATH`.
+- **Poly is missing from the login screen.** Check that
+  `/usr/share/wayland-sessions/poly.desktop` exists and that the display manager
+  reads that directory; `just session` installs the entry again. The session
+  log of the display manager names the reason when the session exits at once
+  (ly writes `~/.local/state/ly-session.log`).
 - **An old version starts.** Run `type -a poly` and check which directory comes
   first. A system installation in `/usr/local/bin` can shadow a user-local
   installation, or the other way around.

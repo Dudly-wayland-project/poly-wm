@@ -1,0 +1,8 @@
+# Installed by the justfile, which rewrites `Exec` to the absolute path of the
+# session launcher. A manual copy also works while `poly-session` is in `PATH`.
+[Desktop Entry]
+Name=Poly
+Comment=A Wayland compositor with JavaScript-scriptable layouts
+Exec=poly-session
+Type=Application
+DesktopNames=POLY

@@ -257,6 +257,10 @@ compositor is up:
 cargo run -- --backend winit -- foot
 ```
 
+The `justfile` wraps these steps (`just build`, `just run`, `just check`,
+`just install`); [docs/installing.md](docs/installing.md) covers installation
+and the display-manager session entry.
+
 Quality gates:
 
 ```sh

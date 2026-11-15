@@ -263,6 +263,8 @@ cargo test --workspace --all-targets
 cargo check --workspace --all-targets --features dbus
 ```
 
+`just check` runs the first three.
+
 For a quick smoke test without a display:
 
 ```sh
