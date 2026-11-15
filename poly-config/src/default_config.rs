@@ -26,10 +26,12 @@ pub const DEFAULT_CONFIG: &str = r##"// Poly configuration (`docs/config.md` for
 //
 //   include("bindings.js");   // runs another file in this same global scope
 //
-// `read_file("path")` returns a file as a string, for generated snippets.
+// `read_file("path")` returns a file as a string, for data rather than code.
 //
-// A `theme.js` next to this file is merged over it when it exists, which is
-// where a palette generator writes its colours; it needs no change here.
+// A program that generates colours writes its own file; import it here and it
+// applies on the next reload, without this file being rewritten:
+//
+//   include("palette.js");
 //
 // Saving this file applies it immediately, with no restart. A broken edit keeps
 // the previous configuration running and shows the problem in a Toast.

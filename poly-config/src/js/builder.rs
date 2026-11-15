@@ -6,10 +6,10 @@
 //! parser then reads that tree exactly as it read a returned table before.
 //!
 //! Keeping the helpers as plain globals means an included file can call them
-//! without importing anything, and the theme layer can use the same vocabulary
-//! as the configuration it decorates (`docs/config.md`, "Theme layer").
+//! without importing anything, so a generated file only has to contain the
+//! calls (`docs/config.md`, "Locating the file").
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -45,8 +45,6 @@ pub(crate) struct Builder {
     pub stack: RefCell<Vec<PathBuf>>,
     /// Time budget for the current evaluation.
     pub budget: Arc<Budget>,
-    /// Whether the theme layer is running; `layout()` is not allowed there.
-    pub in_theme: Cell<bool>,
 }
 
 impl Builder {
@@ -58,7 +56,6 @@ impl Builder {
             includes: RefCell::new(Vec::new()),
             stack: RefCell::new(Vec::new()),
             budget: Arc::new(Budget::new()),
-            in_theme: Cell::new(false),
         };
     }
 
@@ -281,9 +278,6 @@ pub(crate) fn install<'js>(ctx: &Ctx<'js>, builder: &Rc<Builder>) -> rquickjs::R
                       name: JsValue<'js>,
                       value: JsValue<'js>|
                       -> rquickjs::Result<()> {
-                    if builder.in_theme.get() {
-                        return Err(fail(&ctx, "layout() is not allowed in the theme layer"));
-                    }
                     let name = expect_string(&ctx, &name, "layout")?;
                     if builder
                         .layouts
@@ -602,24 +596,6 @@ mod tests {
                 .unwrap();
             assert_eq!(builder.layouts.borrow().len(), 1);
             assert_eq!(builder.layouts.borrow()[0].name, "columns");
-        });
-    }
-
-    #[test]
-    fn layout_is_rejected_in_the_theme() {
-        with_ctx(|ctx, builder| {
-            builder.in_theme.set(true);
-            let error = ctx
-                .eval::<(), _>(r#"layout("columns", { arrange: ctx => ({}) })"#)
-                .unwrap_err();
-            assert!(error.is_exception());
-            let message = ctx
-                .catch()
-                .as_object()
-                .and_then(|object| Exception::from_object(object.clone()))
-                .and_then(|exception| exception.message())
-                .unwrap_or_default();
-            assert!(message.contains("theme"), "{message}");
         });
     }
 

@@ -9,15 +9,10 @@
 //!
 //! `include("bindings.js")` evaluates another file — resolved relative to the
 //! file that called it — and returns its completion value. Included files are
-//! tracked so the reload watcher knows what to watch. All problems are
-//! collected with field paths, and a runaway script is stopped by a wall-clock
-//! budget.
-//!
-//! A `theme.js` next to the root file is not an include but an overlay: it is
-//! executed after the root file, and the values it passes to `config()` (or
-//! returns) are merged over the root object, so that a palette generator can
-//! recolour the compositor without editing the configuration
-//! (`docs/config.md`, "Theme layer").
+//! tracked so the reload watcher knows what to watch, which is also how a
+//! program that generates a palette keeps working: it writes its own file, and
+//! the configuration `include()`s it. All problems are collected with field
+//! paths, and a runaway script is stopped by a wall-clock budget.
 //!
 //! The QuickJS runtime lives on the thread that loads the configuration and is
 //! never sent anywhere (`AGENTS.md` §2.5).
@@ -43,13 +38,12 @@ use rquickjs::{Context, Ctx, Exception, Runtime, Value as JsValue};
 use crate::error::{ConfigError, ConfigMessage, Errors};
 use crate::locate::ConfigSource;
 
-use self::builder::{Builder, convert, fail};
-use self::value::Value;
+use self::builder::{Builder, fail};
 
 /// Maximum nesting of `include()`.
 const MAX_INCLUDE_DEPTH: usize = 32;
 
-/// How long the whole configuration load (root, includes and theme) may run.
+/// How long the whole configuration load (root and its includes) may run.
 const LOAD_BUDGET: Duration = Duration::from_secs(1);
 
 /// Heap QuickJS may use for one load.
@@ -65,9 +59,8 @@ pub struct ConfigLoadResult {
     pub config: Result<crate::config::Config, ConfigError>,
     /// Every file the load touched, for the reload watcher.
     ///
-    /// This is what the watcher stats: the root file, everything `include()`
-    /// pulled in, and the theme layer even when it does not exist yet, so that
-    /// a theme written later is picked up.
+    /// This is what the watcher stats: the root file and everything
+    /// `include()` pulled in, in the order they were read.
     pub includes: Vec<PathBuf>,
     /// Non-fatal problems: unknown settings, a missing configuration file.
     pub warnings: Vec<ConfigMessage>,
@@ -202,7 +195,6 @@ fn load_inner(path: &Path, builder: &Rc<Builder>, errors: &mut Errors) -> Result
                     .to_owned(),
             );
         }
-        overlay_theme(&ctx, builder, &canonical)?;
         return Ok(());
     });
     builder.budget.disarm();
@@ -228,61 +220,6 @@ fn load_inner(path: &Path, builder: &Rc<Builder>, errors: &mut Errors) -> Result
     // programs when there are layouts; otherwise both are dropped here.
     drop(runtime);
     return Ok(Loaded { config, layouts });
-}
-
-/// The optional theme layer, next to the configuration it belongs to.
-///
-/// A theme is a decoration of the user configuration, not a second one: what it
-/// passes to `config()` is merged over the root object instead of replacing it,
-/// which is what makes `theme.js` writable by something that does not
-/// understand the file it is decorating (a wallpaper-driven palette,
-/// `noctalia`).
-fn theme_path(config: &Path) -> Option<PathBuf> {
-    return config.parent().map(|parent| return parent.join("theme.js"));
-}
-
-/// Run `theme.js`, when there is one, and merge it over the root object.
-fn overlay_theme(ctx: &Ctx<'_>, builder: &Rc<Builder>, root: &Path) -> Result<(), String> {
-    let Some(path) = theme_path(root) else {
-        return Ok(());
-    };
-    if !path.is_file() {
-        // Watch where a theme would appear: one written while the compositor is
-        // running (a palette change) has to apply without touching the
-        // configuration, and the watcher reports a created file as a change.
-        builder.includes.borrow_mut().push(path);
-        return Ok(());
-    }
-    let canonical = std::fs::canonicalize(&path)
-        .map_err(|err| return format!("cannot read the theme {}: {err}", path.display()))?;
-    // Loading a theme as the root file (nobody else there) must not merge the
-    // file into itself.
-    if canonical == root {
-        return Ok(());
-    }
-
-    builder.stack.borrow_mut().push(canonical.clone());
-    builder.in_theme.set(true);
-    let result = run_file(ctx, builder, &canonical);
-    builder.in_theme.set(false);
-    builder.stack.borrow_mut().pop();
-    let value = result.map_err(|err| return eval_error(ctx, builder, &err))?;
-
-    if value.is_undefined() || value.is_null() {
-        return Ok(());
-    }
-    let table = match convert(ctx, &value) {
-        Ok(Value::Table(table)) => table,
-        Ok(other) => {
-            return Err(format!(
-                "the theme must call config() or return an object, got {}",
-                other.type_name()
-            ));
-        }
-        Err(err) => return Err(format_error(ctx, &err)),
-    };
-    builder.root.merge_over(&table);
-    return Ok(());
 }
 
 /// Execute the root file, tracking it on the include stack.
@@ -449,9 +386,9 @@ mod tests {
     use super::*;
     use crate::binds::Key;
     use crate::config::{
-        AnimationCurve, Border, Color, Cursor, LayerInteractivity, LayerRule, LayoutOptionValue,
-        ModKey, OutputMode, OutputPosition, OutputScale, OutputTransform, ScrollMethod,
-        StartupSpawn, TiledDrag,
+        AnimationCurve, Color, Cursor, LayerInteractivity, LayerRule, LayoutOptionValue, ModKey,
+        OutputMode, OutputPosition, OutputScale, OutputTransform, ScrollMethod, StartupSpawn,
+        TiledDrag,
     };
     use poly_ipc::Action;
 
@@ -1138,9 +1075,6 @@ mod tests {
             vec![
                 fs::canonicalize(&root).unwrap(),
                 fs::canonicalize(&included).unwrap(),
-                // The theme layer is watched even though there is no
-                // `theme.js`: the place it would appear in is enough.
-                fs::canonicalize(dir.path()).unwrap().join("theme.js"),
             ]
         );
     }
@@ -1475,162 +1409,5 @@ mod tests {
             r#"config({ general: { cursor: { colour: "red" } } });"#,
         );
         assert_eq!(result.warnings.len(), 1);
-    }
-
-    /// Load a configuration that has a `theme.js` next to it.
-    fn load_with_theme(name: &str, config: &str, theme: &str) -> ConfigLoadResult {
-        let dir = TempDir::new(name);
-        dir.write("theme.js", theme);
-        let path = dir.write("config.js", config);
-        return load_file(&path);
-    }
-
-    #[test]
-    fn a_theme_merges_over_the_configuration() {
-        let result = load_with_theme(
-            "theme-merge",
-            r##"
-            config({
-                general: { gap: 4, border: { width: 3, active: "#111111" } },
-                overview: { zoom: 0.25 },
-            });
-            "##,
-            r##"
-            config({
-                general: { border: { active: "#abcdef" } },
-                overview: { card_color: "#202020" },
-            });
-            "##,
-        );
-        let config = match &result.config {
-            Ok(config) => config,
-            Err(err) => panic!("config failed to load: {err}"),
-        };
-        // The theme wins where it speaks.
-        assert_eq!(config.general.border.active, Color::rgb(0xab, 0xcd, 0xef));
-        assert_eq!(config.overview.card_color, Color::rgb(0x20, 0x20, 0x20));
-        // …and leaves everything else alone, including siblings of the objects
-        // it does write.
-        assert_eq!(config.general.gap, 4);
-        assert_eq!(config.general.border.width, 3.0);
-        assert_eq!(config.overview.zoom, 0.25);
-        assert_eq!(config.general.border.inactive, Border::default().inactive);
-    }
-
-    #[test]
-    fn a_theme_replaces_arrays_and_merges_named_objects() {
-        let result = load_with_theme(
-            "theme-sequences",
-            r#"
-            config({
-                keybinds: { "Mod+Q": "close-window", "Mod+W": "close-window" },
-                spawn_at_startup: [{ exec: ["keep-me"] }],
-            });
-            "#,
-            r#"
-            config({
-                keybinds: { "Mod+X": "close-window" },
-                spawn_at_startup: [{ exec: ["from-theme"] }],
-            });
-            "#,
-        );
-        let config = match &result.config {
-            Ok(config) => config,
-            Err(err) => panic!("config failed to load: {err}"),
-        };
-        // A list is replaced: index-wise mixing would be surprising.
-        assert_eq!(
-            config.spawn_at_startup,
-            vec![StartupSpawn::Exec(vec!["from-theme".to_owned()])]
-        );
-        // An object keyed by name is merged, so a theme can add a binding
-        // without dropping the user's.
-        assert_eq!(config.keybinds.len(), 3);
-    }
-
-    #[test]
-    fn a_theme_can_return_its_object() {
-        // A palette generator may prefer one expression over a helper call.
-        let result = load_with_theme(
-            "theme-return",
-            r##"config({ general: { border: { active: "#111111" } } });"##,
-            r##"({ general: { border: { active: "#abcdef" } } });"##,
-        );
-        let config = result.config.expect("config");
-        assert_eq!(config.general.border.active, Color::rgb(0xab, 0xcd, 0xef));
-    }
-
-    #[test]
-    fn a_broken_theme_rejects_the_load() {
-        let result = load_with_theme(
-            "theme-broken",
-            "config({ general: { gap: 4 } });",
-            "config({ general: ",
-        );
-        let err = match result.config {
-            Ok(_) => panic!("a broken theme must reject the configuration"),
-            Err(err) => err,
-        };
-        let text = error_text(&err);
-        assert!(text.contains("theme.js"), "no theme in the error:\n{text}");
-    }
-
-    #[test]
-    fn a_theme_has_to_call_config_or_return_an_object() {
-        let result = load_with_theme(
-            "theme-not-an-object",
-            "config({ general: { gap: 4 } });",
-            "42;",
-        );
-        let err = match result.config {
-            Ok(_) => panic!("a scalar theme must reject the configuration"),
-            Err(err) => err,
-        };
-        let text = error_text(&err);
-        assert!(
-            text.contains("the theme must call config() or return an object"),
-            "unexpected: {text}"
-        );
-    }
-
-    #[test]
-    fn a_theme_cannot_define_layouts() {
-        let result = load_with_theme(
-            "theme-layout",
-            "config({ general: { gap: 4 } });",
-            "layout('columns', { arrange: ctx => ({}) });",
-        );
-        let err = match result.config {
-            Ok(_) => panic!("a theme must not define layouts"),
-            Err(err) => err,
-        };
-        let text = error_text(&err);
-        assert!(text.contains("not allowed in the theme"), "{text}");
-    }
-
-    #[test]
-    fn the_theme_file_is_watched_even_when_it_does_not_exist() {
-        let dir = TempDir::new("theme-watch-missing");
-        let path = dir.write("config.js", "config({});");
-        let result = load_file(&path);
-        assert!(result.config.is_ok());
-        // `noctalia` writes this file while poly runs; the reload watcher only
-        // notices it if the path is part of the include closure.
-        let watched = fs::canonicalize(dir.path()).unwrap().join("theme.js");
-        assert!(
-            result
-                .includes
-                .iter()
-                .any(|include| return include == &watched),
-            "theme.js is not watched: {:?}",
-            result.includes
-        );
-
-        // And once it exists it is part of the closure because it was read.
-        dir.write("theme.js", "config({ general: { gap: 12 } });");
-        let result = load_file(&path);
-        let config = result.config.expect("config");
-        assert_eq!(config.general.gap, 12);
-        assert!(result.includes.contains(&watched));
     }
 }

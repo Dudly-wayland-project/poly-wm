@@ -3,8 +3,8 @@
 //! Scripts are executed by QuickJS, but nothing downstream of the loader knows
 //! that: every global helper converts the JavaScript values it is handed into
 //! this tree, and the parser only ever sees [`Value`]/[`Table`]. That keeps the
-//! validation code free of engine lifetimes and lets the theme layer be merged
-//! as plain data.
+//! validation code free of engine lifetimes and lets repeated `config()` calls
+//! be merged as plain data.
 //!
 //! The shape is deliberately close to the Lua tables the parser was originally
 //! written against: tables are ordered key/value lists, and an array is a table
@@ -266,8 +266,9 @@ impl Table {
     /// Deep-merge `overlay` over this table.
     ///
     /// Objects merge key by key; arrays and scalars replace the old value
-    /// wholesale. That is what makes `theme.js` able to recolour a border
-    /// without losing its width, while `window_rules` stays a single list.
+    /// wholesale. That is what makes a second `config()` call able to recolour
+    /// a border without losing its width, while `window_rules` stays a single
+    /// list.
     pub fn merge_over(&self, overlay: &Table) {
         for (key, value) in overlay.entries() {
             let existing = match key {

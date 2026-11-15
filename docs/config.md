@@ -51,16 +51,14 @@ written for the old syntax. The script may use the standard JavaScript built-ins
 (`Math`, `JSON`, `Object`, `Array`, …), but not `require`, network access or the
 filesystem beyond `include()` and `read_file()`.
 
-## Theme layer
+## Generated files
 
-A `theme.js` next to the configuration file is merged over it when it exists.
-That is how a palette generator recolours Poly without having to understand the
-configuration: it owns one small file, and the user's `config.js` stays
-untouched. The theme is ordinary JavaScript with the same helpers, and it either
-calls `config()` or ends with the object it wants merged:
+Programs that generate settings (a wallpaper-driven palette, a theme switcher)
+own a file of their own and write the helpers they care about; `config.js` only
+has to import it:
 
 ```js
-// ~/.config/poly/theme.js
+// ~/.config/poly/palette.js, written by an external program
 config({
   general: {
     border: { active: "#8ab4f8", inactive: "#3c4043" },
@@ -71,17 +69,24 @@ config({
 });
 ```
 
-Objects are merged key by key, so the theme above changes the border colours and
-keeps the width and radius the user configured. Arrays (`window_rules`,
-`layer_rules`, `spawn_at_startup`) are replaced wholesale instead of being mixed
-entry by entry; objects keyed by name, such as `keybinds` and `outputs`, merge
-like any other object. Defining layouts with `layout()` is rejected in a theme.
-A theme with a syntax error rejects the whole configuration and leaves the
-previous one running, exactly like a broken root file.
+```js
+// ~/.config/poly/config.js
+include("palette.js");
+```
 
-`theme.js` is watched even when it does not exist yet, so writing it while Poly
-runs applies the theme within half a second. Deleting the file returns the
-compositor to the colours in `config.js`.
+The include runs in the same global scope, so it can call `config()`, `bind()`
+or any other helper. It is part of the watched set: rewriting it while Poly runs
+reloads the configuration within half a second, and the generated file is the
+only thing the external program has to write. A palette file should not be
+deleted while `config.js` still includes it; a missing include rejects the
+configuration.
+
+Objects passed to `config()` merge key by key, so the palette above changes the
+border colours and keeps the width and radius configured elsewhere; arrays
+(`window_rules`, `layer_rules`, `spawn_at_startup`) are replaced wholesale
+instead of being mixed entry by entry, and objects keyed by name, such as
+`keybinds` and `outputs`, merge like any other object. A file with a syntax
+error rejects the whole configuration and leaves the previous one running.
 
 ## JavaScript environment
 
@@ -106,7 +111,7 @@ Inside layout functions, `ctx` additionally exposes `ctx.gap`, `ctx.state` and
 `ctx.relayout()`; see [layouts](#layouts).
 
 An accidental infinite loop cannot hang the compositor: evaluating the
-configuration (root file, includes and theme) has a budget of one second, each
+configuration (the root file and every include) has a budget of one second, each
 layout call has ten milliseconds, and the runtime is limited to 64 MiB of memory
 and a 1 MiB stack. Exceeding a budget rejects the configuration, or makes that
 one layout call fall back to the built-in column layout.

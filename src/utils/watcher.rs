@@ -142,13 +142,13 @@ mod tests {
     fn an_include_is_watched_too() {
         let dir = TempFile::new("include");
         let root = dir.write("config.js", "config({})");
-        let theme = dir.write("theme.js", "config({})");
+        let included = dir.write("bindings.js", "config({})");
         let mut watcher = ConfigWatcher::default();
-        watcher.watch(vec![root.clone(), theme.clone()]);
+        watcher.watch(vec![root.clone(), included.clone()]);
         assert_eq!(watcher.paths().count(), 2);
 
-        dir.touch_later(&theme, 1_000);
-        assert_eq!(watcher.changed(), Some(theme));
+        dir.touch_later(&included, 1_000);
+        assert_eq!(watcher.changed(), Some(included));
     }
 
     #[test]

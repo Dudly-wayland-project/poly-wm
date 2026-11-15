@@ -4,7 +4,7 @@
 //! configuration directory, the "load this text" shortcut and a small
 //! [`LayoutContext`]. Keeping them here avoids two copies that would drift.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::Config;
 use crate::error::ConfigError;
@@ -28,11 +28,6 @@ impl TempDir {
         let path = self.0.join(name);
         std::fs::write(&path, contents).unwrap();
         return path;
-    }
-
-    /// The directory itself.
-    pub(crate) fn path(&self) -> &Path {
-        return &self.0;
     }
 }
 

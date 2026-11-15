@@ -102,7 +102,7 @@ different; keep both stable.
 Configuration and layout scripts can contain accidental infinite loops or huge
 allocations. They are bounded by wall-clock and memory budgets:
 
-- 1 second for a whole configuration load (root, includes and theme);
+- 1 second for a whole configuration load (the root file and its includes);
 - 10 ms per layout call (`setup`, `arrange`, an action or `insert`);
 - 64 MiB of QuickJS memory and a 1 MiB stack;
 - a maximum include depth of 32.
