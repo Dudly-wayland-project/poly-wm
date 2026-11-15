@@ -26,9 +26,11 @@ pub mod render;
 pub mod ui;
 pub mod window;
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -365,6 +367,8 @@ pub struct Core {
     pub drag_hint_buffers: Option<DragHintBuffers>,
     /// Cached solid buffers for the workspace overview, per output.
     pub overview_buffers: HashMap<Output, OverviewBuffers>,
+    /// The shared xray backdrop of every output, when `general.blur.xray` is on.
+    pub xray_buffers: HashMap<Output, Rc<RefCell<crate::core::render::XrayBuffer>>>,
 
     /// Compiled window, border, shadow and blur programs.
     pub shaders: crate::core::render::Shaders,
@@ -725,6 +729,7 @@ impl Core {
             fullscreen_backgrounds: HashMap::new(),
             drag_hint_buffers: None,
             overview_buffers: HashMap::new(),
+            xray_buffers: HashMap::new(),
             shaders: crate::core::render::Shaders::new(),
             decorations: crate::core::render::Decorations::new(),
             toasts: crate::core::ui::Toasts::new(),

@@ -431,6 +431,7 @@ impl Udev {
                 }
             }
             core.lock_backgrounds.remove(&output);
+            core.xray_buffers.remove(&output);
             core.lock_surfaces
                 .retain(|(lock_output, _)| return lock_output != &output);
         }
@@ -625,6 +626,7 @@ impl Udev {
                 core.display_handle.remove_global::<State>(global);
                 core.output_state.remove(&output);
                 core.lock_backgrounds.remove(&output);
+                core.xray_buffers.remove(&output);
                 core.lock_surfaces
                     .retain(|(lock_output, _)| return lock_output != &output);
                 return;
@@ -681,6 +683,7 @@ impl Udev {
             }
         }
         core.lock_backgrounds.remove(&output);
+        core.xray_buffers.remove(&output);
         core.lock_surfaces
             .retain(|(lock_output, _)| return lock_output != &output);
         core.queue_redraw_all();
@@ -740,11 +743,12 @@ impl Udev {
 
         let outcome = {
             let now = core.begin_frame(output);
-            let elements = render::output_elements(core, &mut renderer, output, true, now);
             let background = core
                 .output_background(output)
                 .map(|color| return color.to_floats())
                 .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+            let elements =
+                render::output_elements(core, &mut renderer, output, true, now, background);
 
             // The compositor never scans out client buffers directly: it renders
             // into its own swapchain and scans that out. This keeps the element

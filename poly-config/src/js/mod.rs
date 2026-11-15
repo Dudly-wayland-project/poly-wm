@@ -568,7 +568,7 @@ mod tests {
                     border: { width: 2, radius: 12, active: "#ff0000", inactive: "#11223344" },
                     shadow: { enable: true, blur: 24, offset: [0, 6], color: "#000000a0" },
                     blur: { enable: true, passes: 4, offset: 2.5, noise: 0.1,
-                            accept_client_regions: false,
+                            accept_client_regions: false, xray: false,
                             shader: { up: "up.frag", finish: "~/finish.frag" } },
                     opacity: 0.9,
                     window_shader: "glass.frag",
@@ -595,6 +595,7 @@ mod tests {
         assert_eq!(blur.offset, 2.5);
         assert_eq!(blur.noise, 0.1);
         assert!(!blur.accept_client_regions);
+        assert!(!blur.xray);
         assert!(blur.shader.down.is_none());
         assert!(blur.shader.up.as_deref().unwrap().ends_with("up.frag"));
         assert!(
@@ -626,7 +627,7 @@ mod tests {
                 general: {
                     border: { width: -1, radius: 5000, active: "red" },
                     shadow: { blur: -2, offset: [1], color: "#12" },
-                    blur: { passes: 12, offset: -1, noise: 2, shader: { finish: 3 } },
+                    blur: { passes: 12, offset: -1, noise: 2, xray: 1, shader: { finish: 3 } },
                     opacity: 1.5,
                 },
             });
@@ -643,6 +644,7 @@ mod tests {
             "general.blur.passes",
             "general.blur.offset",
             "general.blur.noise",
+            "general.blur.xray",
             "general.blur.shader.finish",
             "general.opacity",
         ] {

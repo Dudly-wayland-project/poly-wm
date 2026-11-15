@@ -409,6 +409,7 @@ fn parse_blur(table: &Table, root: &Path, errors: &mut Errors) -> Blur {
             "noise",
             "accept_client_regions",
             "layer_surfaces",
+            "xray",
             "shader",
         ],
         errors,
@@ -444,6 +445,9 @@ fn parse_blur(table: &Table, root: &Path, errors: &mut Errors) -> Blur {
     }
     if let Some(value) = ex::boolean(table, "layer_surfaces", "general.blur", errors) {
         blur.layer_surfaces = value;
+    }
+    if let Some(value) = ex::boolean(table, "xray", "general.blur", errors) {
+        blur.xray = value;
     }
     if let Some(t) = ex::table(table, "shader", "general.blur", errors) {
         let path = "general.blur.shader";

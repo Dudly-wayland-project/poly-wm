@@ -36,7 +36,7 @@ use smithay::utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Size, T
 
 use crate::core::cursor::CursorRenderElement;
 
-use super::blur::BlurElement;
+use super::blur::{BlurElement, XrayCaptureElement};
 use super::shaders::mat3_uniform;
 use super::visual::CornerRadius;
 
@@ -554,6 +554,9 @@ pub enum OutputElements<R: PolyRenderer> {
     Solid(SolidColorRenderElement),
     /// The blur backdrop of a window.
     Blur(BlurElement),
+    /// The capture that fills the shared xray backdrop of an output. It also
+    /// owns the background elements it repaints before capturing.
+    XrayCapture(XrayCaptureElement<R>),
     /// A border or a drop shadow.
     Shader(ShaderElement),
     /// A Toast.
@@ -571,6 +574,7 @@ impl<R: PolyRenderer> std::fmt::Debug for OutputElements<R> {
             Self::Cursor(_) => "Cursor",
             Self::Solid(_) => "Solid",
             Self::Blur(_) => "Blur",
+            Self::XrayCapture(_) => "XrayCapture",
             Self::Shader(_) => "Shader",
             Self::Toast(_) => "Toast",
             Self::Closing(_) => "Closing",
@@ -588,6 +592,7 @@ impl<R: PolyRenderer> Element for OutputElements<R> {
             Self::Cursor(element) => Element::id(element),
             Self::Solid(element) => Element::id(element),
             Self::Blur(element) => Element::id(element),
+            Self::XrayCapture(element) => Element::id(element),
             Self::Shader(element) => Element::id(element),
             Self::Toast(element) => Element::id(element),
             Self::Closing(element) => Element::id(element),
@@ -602,6 +607,7 @@ impl<R: PolyRenderer> Element for OutputElements<R> {
             Self::Cursor(element) => Element::current_commit(element),
             Self::Solid(element) => Element::current_commit(element),
             Self::Blur(element) => Element::current_commit(element),
+            Self::XrayCapture(element) => Element::current_commit(element),
             Self::Shader(element) => Element::current_commit(element),
             Self::Toast(element) => Element::current_commit(element),
             Self::Closing(element) => Element::current_commit(element),
@@ -616,6 +622,7 @@ impl<R: PolyRenderer> Element for OutputElements<R> {
             Self::Cursor(element) => Element::src(element),
             Self::Solid(element) => Element::src(element),
             Self::Blur(element) => Element::src(element),
+            Self::XrayCapture(element) => Element::src(element),
             Self::Shader(element) => Element::src(element),
             Self::Toast(element) => Element::src(element),
             Self::Closing(element) => Element::src(element),
@@ -630,6 +637,7 @@ impl<R: PolyRenderer> Element for OutputElements<R> {
             Self::Cursor(element) => Element::transform(element),
             Self::Solid(element) => Element::transform(element),
             Self::Blur(element) => Element::transform(element),
+            Self::XrayCapture(element) => Element::transform(element),
             Self::Shader(element) => Element::transform(element),
             Self::Toast(element) => Element::transform(element),
             Self::Closing(element) => Element::transform(element),
@@ -644,6 +652,7 @@ impl<R: PolyRenderer> Element for OutputElements<R> {
             Self::Cursor(element) => Element::geometry(element, scale),
             Self::Solid(element) => Element::geometry(element, scale),
             Self::Blur(element) => Element::geometry(element, scale),
+            Self::XrayCapture(element) => Element::geometry(element, scale),
             Self::Shader(element) => Element::geometry(element, scale),
             Self::Toast(element) => Element::geometry(element, scale),
             Self::Closing(element) => Element::geometry(element, scale),
@@ -662,6 +671,7 @@ impl<R: PolyRenderer> Element for OutputElements<R> {
             Self::Cursor(element) => element.damage_since(scale, commit),
             Self::Solid(element) => element.damage_since(scale, commit),
             Self::Blur(element) => element.damage_since(scale, commit),
+            Self::XrayCapture(element) => element.damage_since(scale, commit),
             Self::Shader(element) => element.damage_since(scale, commit),
             Self::Toast(element) => element.damage_since(scale, commit),
             Self::Closing(element) => element.damage_since(scale, commit),
@@ -676,6 +686,7 @@ impl<R: PolyRenderer> Element for OutputElements<R> {
             Self::Cursor(element) => Element::opaque_regions(element, scale),
             Self::Solid(element) => Element::opaque_regions(element, scale),
             Self::Blur(element) => Element::opaque_regions(element, scale),
+            Self::XrayCapture(element) => Element::opaque_regions(element, scale),
             Self::Shader(element) => Element::opaque_regions(element, scale),
             Self::Toast(element) => Element::opaque_regions(element, scale),
             Self::Closing(element) => Element::opaque_regions(element, scale),
@@ -690,6 +701,7 @@ impl<R: PolyRenderer> Element for OutputElements<R> {
             Self::Cursor(element) => Element::alpha(element),
             Self::Solid(element) => Element::alpha(element),
             Self::Blur(element) => Element::alpha(element),
+            Self::XrayCapture(element) => Element::alpha(element),
             Self::Shader(element) => Element::alpha(element),
             Self::Toast(element) => Element::alpha(element),
             Self::Closing(element) => Element::alpha(element),
@@ -704,6 +716,7 @@ impl<R: PolyRenderer> Element for OutputElements<R> {
             Self::Cursor(element) => Element::kind(element),
             Self::Solid(element) => Element::kind(element),
             Self::Blur(element) => Element::kind(element),
+            Self::XrayCapture(element) => Element::kind(element),
             Self::Shader(element) => Element::kind(element),
             Self::Toast(element) => Element::kind(element),
             Self::Closing(element) => Element::kind(element),
@@ -762,6 +775,9 @@ where
                 cache,
             )
             .map_err(R::gles_error),
+            Self::XrayCapture(element) => {
+                RenderElement::<R>::draw(element, frame, src, dst, damage, opaque_regions, cache)
+            }
             Self::Shader(element) => RenderElement::<GlesRenderer>::draw(
                 element,
                 R::as_gles_frame(frame),

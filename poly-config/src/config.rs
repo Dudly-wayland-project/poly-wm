@@ -344,6 +344,15 @@ pub struct Blur {
     /// only the regions a client requests are blurred, so a bar that does not
     /// ask stays sharp. `enable` is still the master switch.
     pub layer_surfaces: bool,
+    /// Blur only the wallpaper instead of everything below the blurred
+    /// surface.
+    ///
+    /// With `xray` on, the compositor blurs the background layers once per
+    /// output and every blurred window samples that shared copy. Windows and
+    /// bars then never show each other inside their backdrop, and a moving or
+    /// animating window does not have to re-run the blur: only a change of the
+    /// wallpaper (or of the output geometry) does.
+    pub xray: bool,
     /// Custom blur shaders; `None` uses the built-in Kawase ones.
     pub shader: BlurShader,
 }
@@ -357,6 +366,7 @@ impl Default for Blur {
             noise: 0.0,
             accept_client_regions: true,
             layer_surfaces: true,
+            xray: true,
             shader: BlurShader::default(),
         };
     }

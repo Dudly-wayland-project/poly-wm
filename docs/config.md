@@ -275,6 +275,7 @@ config({
       noise: 0.0,
       accept_client_regions: true,
       layer_surfaces: true,
+      xray: true,
       shader: {
         down: "shaders/blur_down.frag",
         up: "shaders/blur_up.frag",
@@ -293,6 +294,7 @@ config({
 | `noise` | `0.0` | Dithering noise that hides banding. Range: 0.0-1.0. |
 | `accept_client_regions` | `true` | Honour the blur regions clients request through `ext-background-effect-v1`. |
 | `layer_surfaces` | `true` | Blur the backdrop of bars, panels and docks that request it. |
+| `xray` | `true` | Blur only the wallpaper instead of every window below the blurred surface. |
 | `shader` | built in | Optional replacement shader files. Paths resolve against the root `config.js`. |
 
 `enable` is the master switch: a client cannot blur anything by itself. With it
@@ -320,6 +322,25 @@ blurred where the client asked: `layer_surfaces` enables the feature, but a
 surface that never calls `set_blur_region` stays sharp, so a wallpaper client
 cannot end up with a blurred screen. `enable` still has to be on, and
 `accept_client_regions` still applies.
+
+`xray` changes what the backdrop contains. With it on (the default) the
+compositor blurs the wallpaper once per output, and every blurred window, bar or
+panel samples that shared copy. A blurred window then shows the wallpaper rather
+than the windows behind it, and moving or animating a window does not re-run the
+blur: only a change of the wallpaper, of the blur parameters or of the output
+geometry does. While the workspace overview is open the shared copy is taken
+after the overview backdrop and the workspace cards are drawn, so it stays in
+step with what the cards show.
+
+The shared copy is made of the output background and the `background` and
+`bottom` layer surfaces, which is why those layers keep no client-requested blur
+of their own while `xray` is on: their content is what everything else samples.
+Put a translucent bar on the `top` layer if it should blur.
+
+With it off, each blurred surface captures everything below it, including
+other windows. That is the classic behaviour, but it costs one blur per
+surface and repaints the captured area whenever anything behind the surface
+changes.
 
 Shader keys are `down` (downsample), `up` (upsample) and `finish` (final pass).
 A shader that fails to compile keeps the previous program and reports the error

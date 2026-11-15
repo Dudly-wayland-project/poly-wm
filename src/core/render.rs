@@ -27,6 +27,7 @@ mod elements;
 mod shaders;
 pub mod visual;
 
+pub use blur::{XrayBuffer, XrayCaptureElement, XrayOverview, XrayState};
 pub use decorations::Decorations;
 pub use elements::{
     AsGlesRenderer, OutputElements, PolyRenderer, ShaderElement, WindowClip, WindowElement,
@@ -34,6 +35,7 @@ pub use elements::{
 };
 pub use shaders::Shaders;
 
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -64,6 +66,7 @@ use smithay::desktop::utils::{
 use smithay::desktop::{PopupManager, layer_map_for_output};
 use smithay::input::pointer::CursorImageStatus;
 use smithay::output::Output;
+use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::user_data::UserDataMap;
@@ -96,6 +99,10 @@ const FRAME_CALLBACK_THROTTLE: Option<Duration> = Some(Duration::from_millis(995
 /// [`Core::begin_frame`]); every animation is sampled from it so the whole
 /// frame is consistent.
 ///
+/// `background` is the colour below every element, i.e. what the backend clears
+/// the frame to. The xray capture element needs it to repaint the background
+/// before capturing (see [`XrayCaptureElement`]).
+///
 /// This is also where the shader programs are (re)compiled and where compile
 /// errors are turned into Toasts: the GL context is only valid here.
 pub fn output_elements<R>(
@@ -104,6 +111,7 @@ pub fn output_elements<R>(
     output: &Output,
     include_cursor: bool,
     now: Instant,
+    background: [f32; 4],
 ) -> Vec<OutputElements<R>>
 where
     R: PolyRenderer,
@@ -207,6 +215,25 @@ where
     let view = core.layout.view(output, output_geometry, now);
     let overview_zoom = (view.overview > 0.0).then_some(view.zoom);
     let overview = overview_zoom.is_some();
+
+    // The shared xray backdrop: one blurred copy of the wallpaper per output.
+    // Everything that decides its content is snapshotted here, so a still
+    // wallpaper only costs a capture when it actually changes.
+    let xray = if core.config.general.blur.enable && core.config.general.blur.xray {
+        let state = xray_state(core, renderer, output, output_geometry, &view, scale, time);
+        let buffer = core
+            .xray_buffers
+            .entry(output.clone())
+            .or_insert_with(|| return Rc::new(RefCell::new(XrayBuffer::new())))
+            .clone();
+        buffer.borrow_mut().begin_frame(state);
+        Some(buffer)
+    } else {
+        // Keep the map clean while the feature is off, and drop the cached
+        // textures with it.
+        core.xray_buffers.remove(output);
+        None
+    };
     let mut fullscreen = Vec::new();
     let mut floating = Vec::new();
     let mut dragging = Vec::new();
@@ -259,6 +286,7 @@ where
         &[Layer::Overlay],
         scale,
         time,
+        xray.as_ref(),
     );
     push_toasts(&mut elements, core, renderer, output, scale);
     // In the overview a fullscreen window is just another card, so it must not
@@ -273,6 +301,7 @@ where
             &[Layer::Top],
             scale,
             time,
+            xray.as_ref(),
         );
     }
 
@@ -303,6 +332,7 @@ where
             time,
             overview_zoom,
             false,
+            xray.as_ref(),
         );
         if overview {
             continue;
@@ -332,6 +362,7 @@ where
             &[Layer::Top],
             scale,
             time,
+            xray.as_ref(),
         );
     }
     push_closing(
@@ -355,6 +386,7 @@ where
             time,
             overview_zoom,
             false,
+            xray.as_ref(),
         );
     }
     for managed in dragging.iter().rev() {
@@ -368,6 +400,7 @@ where
             time,
             overview_zoom,
             false,
+            xray.as_ref(),
         );
     }
     // Niri-style drop indicator: the slot the dragged tiled window will land
@@ -397,14 +430,21 @@ where
             time,
             overview_zoom,
             false,
+            xray.as_ref(),
         );
     }
+    // The background group: the overview backdrop and cards, then the wallpaper
+    // layers. It is built separately because the xray capture element *owns* it
+    // (see below): the capture repaints it itself instead of reading whatever
+    // the framebuffer happens to contain, which may still show a window that has
+    // since moved away.
+    let mut backdrop: Vec<OutputElements<R>> = Vec::new();
     if overview {
         // Cards, card shadows and the backdrop go behind the windows. Each
         // card also gets a scaled copy of the Bottom/Background layers, so the
         // wallpaper is visible inside the thumbnails like it is in niri.
         push_overview(
-            &mut elements,
+            &mut backdrop,
             core,
             renderer,
             output,
@@ -414,16 +454,120 @@ where
         );
     }
     push_layers(
-        &mut elements,
+        &mut backdrop,
         core,
         renderer,
         output,
         &[Layer::Bottom, Layer::Background],
         scale,
         time,
+        xray.as_ref(),
     );
 
+    // Only pay for the capture element when a blur element actually samples the
+    // shared buffer this frame; without xray blur the background is drawn as
+    // usual.
+    let capture = xray
+        .as_ref()
+        .filter(|buffer| return buffer.borrow().is_used())
+        .cloned()
+        .zip(core.shaders.blur().cloned());
+    if let Some((buffer, program)) = capture {
+        let config = &core.config.general.blur;
+        elements.push(OutputElements::XrayCapture(XrayCaptureElement::new(
+            buffer,
+            Rectangle::from_size(output_geometry.size).to_physical_precise_round(scale),
+            program,
+            BlurOptions {
+                passes: config.passes.clamp(1, 16),
+                offset: config.offset,
+            },
+            backdrop,
+            background,
+            Scale::from(scale),
+        )));
+    } else {
+        elements.extend(backdrop);
+    }
+
     return elements;
+}
+
+/// Snapshot everything that decides the content of the shared xray backdrop.
+///
+/// [`XrayBuffer`] compares this against the previous frame: any difference
+/// makes it blur the wallpaper again, and a static wallpaper costs nothing.
+fn xray_state<R>(
+    core: &Core,
+    renderer: &mut R,
+    output: &Output,
+    output_geometry: Rectangle<i32, Logical>,
+    view: &WorkspaceView,
+    scale: f64,
+    time: f32,
+) -> XrayState
+where
+    R: PolyRenderer,
+{
+    let config = &core.config.general.blur;
+
+    // Only the layers the capture actually contains: the wallpaper stack. Their
+    // commits change when a client repaints, and their geometry changes when a
+    // layer reconfigures.
+    let mut layers = Vec::new();
+    let map = layer_map_for_output(output);
+    for layer in [Layer::Bottom, Layer::Background] {
+        for surface in map.layers_on(layer).rev() {
+            let Some(geometry) = map.layer_geometry(surface) else {
+                continue;
+            };
+            let commit = with_renderer_surface_state(surface.wl_surface(), |state| {
+                return state.current_commit();
+            })
+            .unwrap_or_default();
+            layers.push((surface.wl_surface().id().protocol_id(), commit, geometry));
+        }
+    }
+
+    // The overview fades its backdrop and cards in over the wallpaper, so both
+    // are part of the captured content while it is open.
+    let overview = (view.overview > 0.0).then(|| {
+        return XrayOverview {
+            progress: view.overview,
+            zoom: view.zoom,
+            cards: view
+                .cards
+                .iter()
+                .map(|card| return (card.index, card.rect))
+                .collect(),
+        };
+    });
+
+    // A custom `finish()` may read `u_time`; the shared texture then has to be
+    // re-blurred every frame, exactly like the per-window backdrop is.
+    let uses_time = core
+        .shaders
+        .blur()
+        .is_some_and(|program| return program.uses_time());
+
+    return XrayState {
+        context: renderer.as_gles_renderer().context_id(),
+        config_generation: core.config_generation,
+        shader_epoch: core.shaders.epoch(),
+        passes: config.passes.clamp(1, 16),
+        offset_bits: config.offset.to_bits(),
+        background: core.output_background(output),
+        size: output_geometry.size.to_physical_precise_round(scale),
+        scale_bits: scale.to_bits(),
+        transform: output.current_transform(),
+        layers,
+        time_bits: if uses_time {
+            u64::from(time.to_bits())
+        } else {
+            0
+        },
+        overview,
+    };
 }
 
 /// A cached card shadow element.
@@ -867,7 +1011,9 @@ fn push_closing<R>(
 ///
 /// The blur element is pushed last, so the damage tracker captures the
 /// framebuffer before drawing the window itself: the backdrop only ever
-/// contains what is *below* this window.
+/// contains what is *below* this window. With `general.blur.xray` the element
+/// samples the shared output backdrop instead, which is captured right after
+/// the wallpaper.
 #[allow(clippy::too_many_arguments)]
 fn push_window<R>(
     elements: &mut Vec<OutputElements<R>>,
@@ -879,6 +1025,7 @@ fn push_window<R>(
     time: f32,
     overview: Option<f64>,
     snapshot: bool,
+    xray: Option<&Rc<RefCell<XrayBuffer>>>,
 ) where
     R: PolyRenderer,
     R::TextureId: Clone + Send + 'static,
@@ -965,6 +1112,7 @@ fn push_window<R>(
         cursor,
         clip: Some(card_rect),
         blur_region: blur_region.as_deref(),
+        xray,
     };
     let decorations = core.decorations.prepare(&inputs, &core.shaders);
 
@@ -1210,6 +1358,7 @@ fn push_layers<R>(
     layers: &[Layer],
     scale: f64,
     time: f32,
+    xray: Option<&Rc<RefCell<XrayBuffer>>>,
 ) where
     R: PolyRenderer,
     R::TextureId: Clone + Send + 'static,
@@ -1250,8 +1399,18 @@ fn push_layers<R>(
             // The backdrop of a bar, panel or dock goes below everything of
             // this surface, popups included, so it only captures what is
             // behind the layer.
-            if let Some(blur) = layer_blur(core, surface.wl_surface(), geometry, scale, time) {
-                elements.push(OutputElements::Blur(blur));
+            //
+            // The wallpaper layers are skipped with xray: the shared backdrop
+            // already contains them, so their own blur would blur itself.
+            let wallpaper = matches!(layer, Layer::Bottom | Layer::Background);
+            if !(wallpaper && xray.is_some()) {
+                if let Some(blur) = layer_blur(core, surface.wl_surface(), geometry, scale, time) {
+                    let blur = match xray {
+                        Some(buffer) => blur.with_xray(buffer.clone()),
+                        None => blur,
+                    };
+                    elements.push(OutputElements::Blur(blur));
+                }
             }
         }
     }
@@ -1642,6 +1801,8 @@ pub fn snapshot_window(
         time,
         None,
         true,
+        // A close snapshot has no shared backdrop to sample either.
+        None,
     );
     let window_elements = elements
         .iter()
@@ -1761,11 +1922,18 @@ pub fn capture_output(
     // The element list needs `&mut Core` and the renderer, so it is built
     // before the session is borrowed: `CaptureState` is a separate field of
     // `State` for exactly this reason (`handlers/image_copy_capture.rs`).
-    let elements = output_elements(core, renderer, output, draw_cursor, Instant::now());
     let background = core
         .output_background(output)
         .map(|color| return color.to_floats())
         .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+    let elements = output_elements(
+        core,
+        renderer,
+        output,
+        draw_cursor,
+        Instant::now(),
+        background,
+    );
 
     let session = capture.session(key, renderer, size, scale.into())?;
     return session.capture_frame(renderer, &elements, background, buffer);
@@ -1808,11 +1976,18 @@ pub fn capture_region(
     // The element list needs `&mut Core` and the renderer, so it is built before
     // the target is borrowed (`handlers/screencopy.rs` destructures `State` for
     // the same reason).
-    let elements = output_elements(core, renderer, output, draw_cursor, Instant::now());
     let background = core
         .output_background(output)
         .map(|color| return color.to_floats())
         .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+    let elements = output_elements(
+        core,
+        renderer,
+        output,
+        draw_cursor,
+        Instant::now(),
+        background,
+    );
 
     let target = capture.screencopy_target(
         renderer,

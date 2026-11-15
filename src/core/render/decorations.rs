@@ -14,6 +14,7 @@
 //! Shader reloads bump every epoch through
 //! [`Decorations::begin_frame`].
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -24,7 +25,7 @@ use smithay::backend::renderer::utils::CommitCounter;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 use tracing::warn;
 
-use super::blur::{BlurElement, BlurOptions, BlurProgram};
+use super::blur::{BlurElement, BlurOptions, BlurProgram, XrayBuffer};
 use super::elements::ShaderElement;
 use super::shaders::Shaders;
 use super::visual::{CornerRadius, WindowVisuals};
@@ -61,6 +62,10 @@ pub struct DecorationInputs<'a> {
     /// empty slice a client uses to switch the blur off, which must not be
     /// confused with "no opinion".
     pub blur_region: Option<&'a [Rectangle<i32, Logical>]>,
+    /// The shared xray backdrop of the output, when `general.blur.xray` is on.
+    ///
+    /// The blur element then samples it instead of capturing the framebuffer.
+    pub xray: Option<&'a Rc<RefCell<XrayBuffer>>>,
 }
 
 /// Normalize `clip` (output-local logical) into the window's geometry space,
@@ -536,7 +541,7 @@ impl Decorations {
         }
 
         let (cached, _, id, commit) = entry.blur.as_ref()?;
-        return Some(BlurElement::new(
+        let element = BlurElement::new(
             id.clone(),
             *commit,
             program.clone(),
@@ -552,7 +557,11 @@ impl Decorations {
             inputs.alpha,
             program.uses_time(),
             inputs.time,
-        ));
+        );
+        return match inputs.xray {
+            Some(buffer) => Some(element.with_xray(buffer.clone())),
+            None => Some(element),
+        };
     }
 
     /// Warn once per window about a visual feature that could not be applied.
@@ -603,6 +612,7 @@ mod tests {
             cursor: [-1.0, -1.0],
             clip: None,
             blur_region,
+            xray: None,
         };
     }
 
