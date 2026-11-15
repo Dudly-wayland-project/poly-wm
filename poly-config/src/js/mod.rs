@@ -661,6 +661,9 @@ mod tests {
             bind("Mod+D", { set_layout: "dwindle" });
             bind("Mod+E", { layout_action: "focus-left" });
             bind("Mod+Shift+E", { layout_action: ["resize-column", "0.5"] });
+            bind("Mod+M", { minimize_window: true });
+            bind("Mod+Shift+M", { restore_window: true });
+            bind("Mod+Alt+M", { minimize_window: 7 });
             "#,
         );
         assert!(result.warnings.is_empty(), "{:?}", result.warnings);
@@ -695,6 +698,9 @@ mod tests {
                 args: vec!["0.5".into()],
             }
         );
+        assert_eq!(action("Mod+M"), Action::MinimizeWindow { id: None });
+        assert_eq!(action("Mod+Shift+M"), Action::RestoreWindow { id: None });
+        assert_eq!(action("Mod+Alt+M"), Action::MinimizeWindow { id: Some(7) });
     }
 
     #[test]
@@ -970,6 +976,8 @@ mod tests {
             bind("Mod+Q", "frobnicate");
             bind("Mod+W", { spawn: [] });
             bind("Mod+E", 42);
+            bind("Mod+M", { minimize_window: false });
+            bind("Mod+N", { restore_window: 0 });
             "#,
         );
         let text = error_text(&err);
@@ -995,6 +1003,14 @@ mod tests {
         );
         assert!(
             text.contains(r#"keybinds["Mod+E"]: expected an action"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"keybinds["Mod+M"].minimize_window: expected true or a window id"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"keybinds["Mod+N"].restore_window: window ids start at 1"#),
             "{text}"
         );
     }

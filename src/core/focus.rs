@@ -14,7 +14,6 @@ use smithay::wayland::shell::wlr_layer::{KeyboardInteractivity, Layer};
 use tracing::trace;
 
 use crate::core::handlers::layer_shell::{effective_keyboard_interactivity, layer_and_output};
-use crate::core::window::window_for_root;
 use crate::state::State;
 
 /// The root surface of the window that should receive the keyboard, if any.
@@ -23,7 +22,12 @@ pub fn focused_window_root(state: &State) -> Option<WlSurface> {
     if !root.alive() {
         return None;
     }
-    window_for_root(state, root)?;
+    // `window_for_root` still finds minimized windows (they stay managed), but
+    // they are not on screen and must not hold the keyboard.
+    let managed = state.core.layout.by_root(root)?;
+    if managed.minimized {
+        return None;
+    }
     return Some(root.clone());
 }
 

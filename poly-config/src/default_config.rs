@@ -117,6 +117,8 @@ bind("Mod+Return", { spawn: ["foot"] });
 bind("Mod+Q", "close-window");
 bind("Mod+Space", "toggle-floating");
 bind("Mod+F", "toggle-fullscreen");
+bind("Mod+M", "minimize-window");
+bind("Mod+Shift+M", "restore-window");
 bind("Mod+Tab", "cycle-layout");
 bind("Mod+Left", "focus-left");
 bind("Mod+Right", "focus-right");

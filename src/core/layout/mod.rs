@@ -65,6 +65,13 @@ pub struct ManagedWindow {
     pub output: Option<smithay::output::Output>,
     /// Whether the layout places it. Floating windows keep their own rect.
     pub tiled: bool,
+    /// Whether it is minimized.
+    ///
+    /// A minimized window keeps its place in its workspace's tiled or floating
+    /// list, so the IPC window list and the taskbar keep it, but it is removed
+    /// from the space: it is not drawn, hit-tested or sent frame callbacks, and
+    /// the layout reflows over its slot. Focusing it restores it.
+    pub minimized: bool,
     /// Whether it is fullscreen.
     pub fullscreen: Option<FullscreenMode>,
     /// The rectangle to return to when a floating window stops being
@@ -344,17 +351,35 @@ impl Workspace {
     fn contains(&self, id: u64) -> bool {
         return self.tiled.contains(&id) || self.floating.contains(&id);
     }
+}
 
-    /// The window to focus when the workspace is entered and its remembered
-    /// focus is gone: floating windows first (they are on top), then the last
-    /// tiled one.
-    fn preferred_focus(&self) -> Option<u64> {
-        return self
+/// The window `workspace` should focus, skipping minimized windows.
+///
+/// Floating windows come first (they are on top), then the last tiled one.
+/// This is [`Workspace`]'s preferred focus with the windows the user hid left
+/// out; it cannot live on `Workspace` because that type does not see the
+/// window table.
+fn visible_focus(state: &State, workspace: &Workspace) -> Option<u64> {
+    let visible = |id: &u64| {
+        return state
+            .core
+            .layout
+            .windows
+            .get(id)
+            .is_some_and(|window| return !window.minimized);
+    };
+    let remembered = workspace.focus.filter(|id| {
+        return workspace.contains(*id) && visible(id);
+    });
+    return remembered.or_else(|| {
+        return workspace
             .floating
-            .last()
-            .or_else(|| return self.tiled.last())
-            .copied();
-    }
+            .iter()
+            .rev()
+            .chain(workspace.tiled.iter().rev())
+            .copied()
+            .find(|id| return visible(id));
+    });
 }
 
 /// Where focus should go when `id` disappears from a workspace.
@@ -623,6 +648,11 @@ pub struct WorkspaceSnapshot {
     pub tiled: Vec<u64>,
     /// Floating windows, in stacking order.
     pub floating: Vec<u64>,
+    /// Windows in those lists that are minimized.
+    ///
+    /// They stay in the lists so the taskbar can still show and restore them;
+    /// this tells consumers which ids the layout does not currently place.
+    pub minimized: Vec<u64>,
 }
 
 /// One managed window, as reported over IPC.
@@ -639,6 +669,8 @@ pub struct WindowSnapshot {
     pub workspace: Option<usize>,
     /// Whether the layout places it.
     pub tiled: bool,
+    /// Whether it is minimized.
+    pub minimized: bool,
     /// Fullscreen mode, when fullscreen.
     pub fullscreen: Option<FullscreenMode>,
 }
@@ -879,7 +911,12 @@ impl LayoutManager {
         let workspace = layout.workspaces.get(index)?;
         return focus_candidates(&workspace.tiled, &workspace.floating, id)
             .into_iter()
-            .find(|candidate| return self.windows.contains_key(candidate));
+            .find(|candidate| {
+                return self
+                    .windows
+                    .get(candidate)
+                    .is_some_and(|window| return !window.minimized);
+            });
     }
 
     /// The workspace stack of `output`, projected for drawing at `now`.
@@ -951,6 +988,12 @@ impl LayoutManager {
             let Some(managed) = manager.windows.get(&id) else {
                 return;
             };
+            // A minimized window is still in the workspace list but not on
+            // screen: the renderer must not draw it, and `sync_space` must not
+            // map it back into the space.
+            if managed.minimized {
+                return;
+            }
             let Some(rect) = view.project(workspace, managed.rect_at(now)) else {
                 return;
             };
@@ -991,7 +1034,8 @@ impl LayoutManager {
             .chain(layout.ws().floating.iter())
             .any(|id| {
                 return self.windows.get(id).is_some_and(|window| {
-                    return window.fullscreen == Some(FullscreenMode::Fullscreen);
+                    return window.fullscreen == Some(FullscreenMode::Fullscreen)
+                        && !window.minimized;
                 });
             });
     }
@@ -1008,6 +1052,7 @@ impl LayoutManager {
                 focus: None,
                 tiled: Vec::new(),
                 floating: Vec::new(),
+                minimized: Vec::new(),
             }];
         };
         return layout
@@ -1022,6 +1067,18 @@ impl LayoutManager {
                     focus: workspace.focus,
                     tiled: workspace.tiled.clone(),
                     floating: workspace.floating.clone(),
+                    minimized: workspace
+                        .tiled
+                        .iter()
+                        .chain(workspace.floating.iter())
+                        .copied()
+                        .filter(|id| {
+                            return self
+                                .windows
+                                .get(id)
+                                .is_some_and(|window| return window.minimized);
+                        })
+                        .collect(),
                 };
             })
             .collect();
@@ -1048,6 +1105,7 @@ impl LayoutManager {
             output: managed.output.clone(),
             workspace,
             tiled: managed.tiled,
+            minimized: managed.minimized,
             fullscreen: managed.fullscreen,
         });
     }
@@ -1206,6 +1264,7 @@ impl LayoutManager {
             root: root.clone(),
             output: output.clone(),
             tiled: !floating,
+            minimized: false,
             fullscreen: None,
             floating_rect: initial,
             target_rect: initial,
@@ -1650,8 +1709,30 @@ impl LayoutManager {
     ) -> Option<(LayoutContext, Vec<u64>, Vec<u64>, String)> {
         let layout = state.core.layout.outputs.get(output)?;
         let workspace = layout.workspaces.get(index)?;
-        let tiled = workspace.tiled.clone();
-        let floating = workspace.floating.clone();
+        // Minimized windows stay in the lists (the taskbar restores them by id)
+        // but take no part in the layout: they get no rectangle, do not count
+        // for the scripted `ctx.windows`, and the remaining windows reflow over
+        // their slot.
+        let visible = |id: &u64| {
+            return state
+                .core
+                .layout
+                .windows
+                .get(id)
+                .is_some_and(|window| return !window.minimized);
+        };
+        let tiled = workspace
+            .tiled
+            .iter()
+            .copied()
+            .filter(visible)
+            .collect::<Vec<_>>();
+        let floating = workspace
+            .floating
+            .iter()
+            .copied()
+            .filter(visible)
+            .collect::<Vec<_>>();
         let layout_name = workspace.layout.clone();
         let workspace_id = workspace.id;
 
@@ -1969,6 +2050,19 @@ impl LayoutManager {
         let mut changed = false;
 
         if let Some(order) = effects.order {
+            // `ctx.windows` only lists the windows the layout places, so a
+            // scripted layout orders the visible windows. Minimized ones keep
+            // their position in the list (the taskbar restores them by id, and
+            // their slot is where they come back), so the returned order is
+            // validated against the visible subset and merged back in.
+            let minimized = state
+                .core
+                .layout
+                .windows
+                .iter()
+                .filter(|(_, window)| return window.minimized)
+                .map(|(id, _)| return *id)
+                .collect::<HashSet<_>>();
             let result = (|| -> Result<(), String> {
                 let Some(layout) = state.core.layout.outputs.get_mut(output) else {
                     return Err(format!("output {} has no workspace stack", output.name()));
@@ -1976,19 +2070,13 @@ impl LayoutManager {
                 let Some(workspace) = layout.workspaces.get_mut(index) else {
                     return Err(format!("output {} has no workspace {index}", output.name()));
                 };
-                let current = workspace.tiled.iter().copied().collect::<HashSet<_>>();
-                let mut seen = HashSet::new();
-                let valid = order.len() == current.len()
-                    && order
-                        .iter()
-                        .all(|id| return current.contains(id) && seen.insert(*id));
-                if !valid {
+                let Some(merged) = merge_visible_order(&workspace.tiled, order, &minimized) else {
                     return Err(format!(
                         "layout action returned an order that is not a permutation of workspace {index} on {}",
                         output.name()
                     ));
-                }
-                workspace.tiled = order;
+                };
+                workspace.tiled = merged;
                 return Ok(());
             })();
             match result {
@@ -2050,6 +2138,15 @@ impl LayoutManager {
         // focus cycle. A compositor-managed fullscreen window owns the output
         // on its own until it leaves fullscreen.
         ids.extend(floating);
+        // Minimized windows are not on screen, so the cycle skips them.
+        ids.retain(|id| {
+            return state
+                .core
+                .layout
+                .windows
+                .get(id)
+                .is_some_and(|window| return !window.minimized);
+        });
         let fullscreen_ids = ids
             .iter()
             .copied()
@@ -2090,11 +2187,16 @@ impl LayoutManager {
     /// The window may live on another workspace or on another output: its
     /// workspace is brought on screen first. Taking the keyboard makes that
     /// output the active one, because [`Self::active_output`] follows the
-    /// focused window. Returns whether there was such a window.
+    /// focused window. A minimized window is restored first. Returns whether
+    /// there was such a window.
     pub fn focus_window_id(state: &mut State, id: u64) -> bool {
         let Some((output, index)) = state.core.layout.workspace_of(id) else {
             return false;
         };
+        // Restoring is what focusing a minimized window means: it has to rejoin
+        // the space before it can hold the keyboard. `focus_window` relayouts,
+        // which maps it again.
+        Self::unminimize(state, id);
         let Some(managed) = state.core.layout.windows.get(&id) else {
             return false;
         };
@@ -2106,6 +2208,127 @@ impl LayoutManager {
         focus_window(state, &window, Some(root), SERIAL_COUNTER.next_serial());
         state.core.queue_redraw_all();
         return true;
+    }
+
+    /// Minimize the focused window (`minimize-window` without an id).
+    ///
+    /// Focus moves to the next window of the workspace, so the keyboard does
+    /// not stay on a window that is no longer on screen.
+    pub fn minimize_focused(state: &mut State) {
+        let Some(id) = focused_id(state) else {
+            debug!("minimize-window: no window has the focus");
+            return;
+        };
+        Self::minimize_window(state, id);
+    }
+
+    /// Minimize a window by id.
+    ///
+    /// The window keeps its workspace and its place in the tiled/floating list
+    /// — the taskbar still lists it and `poly msg windows` still reports it —
+    /// but it leaves the space, so it is no longer drawn, hit-tested or sent
+    /// frame callbacks, and the layout reflows over its slot. Restoring it (or
+    /// focusing it) puts it back. Returns whether it was minimized by this call.
+    pub fn minimize_window(state: &mut State, id: u64) -> bool {
+        let Some((output, _)) = state.core.layout.workspace_of(id) else {
+            debug!("minimize-window: window {id} is not managed");
+            return false;
+        };
+        let had_focus = focused_id(state) == Some(id);
+        let window = {
+            let Some(managed) = state.core.layout.windows.get_mut(&id) else {
+                return false;
+            };
+            if managed.minimized {
+                return false;
+            }
+            managed.minimized = true;
+            managed.animation = None;
+            managed.drag_rect = None;
+            managed.drop_preview = None;
+            managed.window.clone()
+        };
+        // The window leaves the space, so it cannot keep the `Activated` state
+        // (Smithay only clears it for elements the space still holds) and it
+        // must not receive frame callbacks while hidden.
+        state.core.space.unmap_elem(&window);
+        window.set_activated(false);
+        if had_focus {
+            set_window_focus(state, None);
+        }
+        state.core.layout.dirty_space = true;
+        Self::relayout(state);
+        if had_focus {
+            Self::restore_workspace_focus(state, &output);
+        }
+        crate::core::focus::update_keyboard_focus(state);
+        state.core.queue_redraw_all();
+        return true;
+    }
+
+    /// Restore the most recently minimized window of the active workspace
+    /// (`restore-window` without an id) and focus it.
+    pub fn restore_last_minimized(state: &mut State) {
+        let Some(id) = Self::last_minimized(state) else {
+            debug!("restore-window: the active workspace has no minimized window");
+            return;
+        };
+        Self::restore_window(state, id);
+    }
+
+    /// Restore a minimized window and focus it (`restore-window` with an id).
+    ///
+    /// Returns whether the window was minimized before the call. Focusing is
+    /// deliberate: restoring is only useful if the window comes back to the
+    /// user, and the taskbar entry it was clicked from is gone afterwards.
+    pub fn restore_window(state: &mut State, id: u64) -> bool {
+        if !Self::unminimize(state, id) {
+            return false;
+        }
+        Self::focus_window_id(state, id);
+        return true;
+    }
+
+    /// Put a minimized window back into the space without changing focus.
+    ///
+    /// `relayout` maps it again at its layout slot; the caller decides where
+    /// the keyboard goes. Returns whether the window was minimized.
+    fn unminimize(state: &mut State, id: u64) -> bool {
+        let Some(managed) = state.core.layout.windows.get_mut(&id) else {
+            return false;
+        };
+        if !managed.minimized {
+            return false;
+        }
+        managed.minimized = false;
+        managed.animation = None;
+        state.core.layout.dirty_space = true;
+        return true;
+    }
+
+    /// The id of the most recently minimized window on the active workspace.
+    ///
+    /// The workspace lists keep minimized windows in layout order, so the last
+    /// one in them is the newest: `toggle_floating` and the layout actions
+    /// append, and minimizing does not reorder.
+    fn last_minimized(state: &State) -> Option<u64> {
+        let output = Self::active_output(state)?;
+        let layout = state.core.layout.outputs.get(&output)?;
+        let workspace = layout.ws();
+        return workspace
+            .floating
+            .iter()
+            .rev()
+            .chain(workspace.tiled.iter().rev())
+            .copied()
+            .find(|id| {
+                return state
+                    .core
+                    .layout
+                    .windows
+                    .get(id)
+                    .is_some_and(|window| return window.minimized);
+            });
     }
 
     /// Move the focused tiled window one slot left or right.
@@ -2122,10 +2345,38 @@ impl LayoutManager {
         else {
             return;
         };
+        let Some(layout) = state.core.layout.outputs.get(&output) else {
+            return;
+        };
+        // Only visible windows take part in the move: swapping with a minimized
+        // neighbour would reorder something the user cannot see.
+        let visible = layout
+            .ws()
+            .tiled
+            .iter()
+            .copied()
+            .filter(|entry| {
+                return state
+                    .core
+                    .layout
+                    .windows
+                    .get(entry)
+                    .is_some_and(|window| return !window.minimized);
+            })
+            .collect::<Vec<_>>();
+        let Some(index) = visible.iter().position(|entry| return *entry == id) else {
+            return;
+        };
+        let len = visible.len();
+        let next = (index as isize + delta).rem_euclid(len as isize) as usize;
+        let target = visible[next];
+        if target == id {
+            return;
+        }
         let Some(layout) = state.core.layout.outputs.get_mut(&output) else {
             return;
         };
-        let Some(index) = layout
+        let Some(from) = layout
             .ws()
             .tiled
             .iter()
@@ -2133,9 +2384,15 @@ impl LayoutManager {
         else {
             return;
         };
-        let len = layout.ws().tiled.len();
-        let next = (index as isize + delta).rem_euclid(len as isize) as usize;
-        layout.ws_mut().tiled.swap(index, next);
+        let Some(to) = layout
+            .ws()
+            .tiled
+            .iter()
+            .position(|entry| return *entry == target)
+        else {
+            return;
+        };
+        layout.ws_mut().tiled.swap(from, to);
         Self::relayout(state);
         state.core.queue_redraw_all();
     }
@@ -2326,6 +2583,11 @@ impl LayoutManager {
                     let Some(window) = state.core.layout.windows.get(id) else {
                         continue;
                     };
+                    // A minimized window is not drawn on the card, so it cannot
+                    // be what the click hit.
+                    if window.minimized {
+                        continue;
+                    }
                     let Some(rect) = view.project(card.index, window.rect_at(now)) else {
                         continue;
                     };
@@ -2426,11 +2688,7 @@ impl LayoutManager {
         let Some(layout) = state.core.layout.outputs.get(output) else {
             return false;
         };
-        let workspace = layout.ws();
-        let remembered = workspace
-            .focus
-            .filter(|id| return workspace.contains(*id))
-            .or_else(|| return workspace.preferred_focus());
+        let remembered = visible_focus(state, layout.ws());
         let Some(id) = remembered else {
             // An empty workspace has nothing to focus: leave the keyboard with
             // no window (layers may still hold it).
@@ -2464,26 +2722,22 @@ impl LayoutManager {
             return;
         }
         let default_layout = state.core.layout.default_layout.clone();
-        let Some(layout) = state.core.layout.outputs.get_mut(&output) else {
-            return;
-        };
-        layout.ensure_workspace(index, &default_layout);
         let tiled = state
             .core
             .layout
             .windows
             .get(&id)
             .is_some_and(|window| return window.tiled);
+        let Some(layout) = state.core.layout.outputs.get_mut(&output) else {
+            return;
+        };
+        layout.ensure_workspace(index, &default_layout);
         for workspace in &mut layout.workspaces {
             workspace.tiled.retain(|entry| return *entry != id);
             workspace.floating.retain(|entry| return *entry != id);
             if workspace.focus == Some(id) {
                 workspace.focus = None;
             }
-        }
-        // The workspace it left keeps a sensible focus.
-        if let Some(workspace) = layout.workspaces.get_mut(current) {
-            workspace.focus = workspace.preferred_focus();
         }
         if let Some(workspace) = layout.workspaces.get_mut(index) {
             if tiled {
@@ -2492,6 +2746,26 @@ impl LayoutManager {
                 workspace.floating.push(id);
             }
             workspace.focus = Some(id);
+        }
+        // The workspace it left keeps a sensible focus. Minimized windows are
+        // not candidates: they are not on screen.
+        let left = state
+            .core
+            .layout
+            .outputs
+            .get(&output)
+            .and_then(|layout| layout.workspaces.get(current))
+            .and_then(|workspace| return visible_focus(state, workspace));
+        if let Some(left) = left {
+            let previous = state
+                .core
+                .layout
+                .outputs
+                .get_mut(&output)
+                .and_then(|layout| layout.workspaces.get_mut(current));
+            if let Some(workspace) = previous {
+                workspace.focus = Some(left);
+            }
         }
         // Leaving a workspace cancels its fullscreen: the window is now shown
         // in the new one at its normal layout size.
@@ -3668,15 +3942,16 @@ fn sync_space(state: &mut State) {
         if known.contains(&id) {
             continue;
         }
-        let Some(location) = state
-            .core
-            .layout
-            .windows
-            .get(&id)
-            .map(|window| return window.rect_at(now).loc)
-        else {
+        let Some(managed) = state.core.layout.windows.get(&id) else {
             continue;
         };
+        // A minimized window is deliberately absent from the space; the
+        // fallback exists for windows the layout does not place yet, not for
+        // ones the user hid.
+        if managed.minimized {
+            continue;
+        }
+        let location = managed.rect_at(now).loc;
         order.push((id, location));
     }
 
@@ -3945,6 +4220,42 @@ pub(crate) fn focused_id(state: &State) -> Option<u64> {
     return state.core.layout.roots.get(root).copied();
 }
 
+/// Merge an order returned by a scripted layout into the full tiled list.
+///
+/// The layout only sees the windows it places, so `order` is a permutation of
+/// the visible ones. Minimized windows keep their slot: the taskbar restores
+/// them by id, and coming back where they were is what a user expects. Returns
+/// `None` when `order` is not a permutation of the visible windows.
+fn merge_visible_order(
+    current: &[u64],
+    order: Vec<u64>,
+    minimized: &HashSet<u64>,
+) -> Option<Vec<u64>> {
+    let visible = current
+        .iter()
+        .copied()
+        .filter(|id| return !minimized.contains(id))
+        .collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    let valid = order.len() == visible.len()
+        && order
+            .iter()
+            .all(|id| return visible.contains(id) && seen.insert(*id));
+    if !valid {
+        return None;
+    }
+    let mut ordered = order.into_iter();
+    let mut merged = Vec::with_capacity(current.len());
+    for id in current.iter().copied() {
+        if minimized.contains(&id) {
+            merged.push(id);
+        } else if let Some(next) = ordered.next() {
+            merged.push(next);
+        }
+    }
+    return Some(merged);
+}
+
 /// The index in the full tiled list (including `excluded`) where a window
 /// dropped at `point` should be inserted.
 ///
@@ -3969,22 +4280,21 @@ fn insertion_index(
         .copied()
         .filter(|id| return *id != excluded)
         .collect::<Vec<_>>();
-    let Some(others) = remaining
+    // Minimized windows have no on-screen rectangle, so they cannot be a drop
+    // target. They stay in `remaining` (that is where the window is inserted),
+    // but they are never picked as the anchor.
+    let others = remaining
         .iter()
-        .map(|id| {
-            return state
-                .core
-                .layout
-                .windows
-                .get(id)
-                .map(|window| return (*id, window.rect_at(now)));
+        .filter_map(|id| {
+            let window = state.core.layout.windows.get(id)?;
+            if window.minimized {
+                return None;
+            }
+            return Some((*id, window.rect_at(now)));
         })
-        .collect::<Option<Vec<_>>>()
-    else {
-        return remaining.len();
-    };
+        .collect::<Vec<_>>();
     if others.is_empty() {
-        return 0;
+        return remaining.len();
     }
     let mut ordered = others.clone();
     ordered.sort_by_key(|(_, rect)| {
@@ -4322,6 +4632,53 @@ mod tests {
     fn a_lone_window_has_no_focus_candidate() {
         assert!(focus_candidates(&[10], &[], 10).is_empty());
         assert!(focus_candidates(&[], &[], 10).is_empty());
+    }
+
+    #[test]
+    fn a_layout_order_keeps_minimized_windows_in_their_slot() {
+        // Windows 10 and 12 are minimized, so the layout only sees 11 and 13.
+        let minimized = HashSet::from([10, 12]);
+        let merged = merge_visible_order(&[10, 11, 12, 13], vec![13, 11], &minimized);
+        assert_eq!(merged, Some(vec![10, 13, 12, 11]));
+        // Nothing is minimized: the order is used as it is.
+        assert_eq!(
+            merge_visible_order(&[10, 11], vec![11, 10], &HashSet::new()),
+            Some(vec![11, 10])
+        );
+        // Everything is minimized: the list is unchanged.
+        assert_eq!(
+            merge_visible_order(&[10], vec![], &HashSet::from([10])),
+            Some(vec![10])
+        );
+        // The layout may not invent, drop or repeat a window.
+        assert_eq!(
+            merge_visible_order(&[10, 11], vec![11], &HashSet::new()),
+            None
+        );
+        assert_eq!(
+            merge_visible_order(&[10, 11], vec![11, 11], &HashSet::new()),
+            None
+        );
+        assert_eq!(
+            merge_visible_order(&[10, 11], vec![11, 12], &HashSet::new()),
+            None
+        );
+        // Minimized windows are not part of the order the layout may return.
+        assert_eq!(
+            merge_visible_order(&[10, 11], vec![10, 11], &HashSet::from([10])),
+            None
+        );
+    }
+
+    #[test]
+    fn columns_reflow_over_a_minimized_window() {
+        // `workspace_context` hands the layout only the visible windows, so a
+        // minimized column simply disappears and the others share its width.
+        let inset = inset_area(area(0, 0, 1920, 1080), 8);
+        let windows = column_layout(&[1, 3], &[], inset, 8);
+        assert_eq!(windows.get(&1), Some(&area(8, 8, 948, 1064)));
+        assert_eq!(windows.get(&3), Some(&area(964, 8, 948, 1064)));
+        assert_eq!(windows.get(&2), None);
     }
 
     #[test]

@@ -11,7 +11,7 @@ use smithay::input::pointer::CursorImageStatus;
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Resource, WEnum};
-use smithay::utils::{Logical, Point, SERIAL_COUNTER};
+use smithay::utils::{Logical, Point};
 use smithay::wayland::foreign_toplevel_list::{
     ForeignToplevelListHandler, ForeignToplevelListState,
 };
@@ -34,7 +34,7 @@ use smithay::wayland::xdg_toplevel_icon::XdgToplevelIconHandler;
 use smithay::wayland::xdg_toplevel_tag::XdgToplevelTagHandler;
 use tracing::{debug, info, trace};
 
-use crate::core::window::{focus_window, root_surface, window_for_root};
+use crate::core::window::{root_surface, window_for_root};
 use crate::state::State;
 
 impl FractionalScaleHandler for State {}
@@ -180,21 +180,19 @@ impl XdgActivationHandler for State {
         // Any client holding a token may ask for focus; that is what tokens
         // are for. Rate limiting for misbehaving clients is not implemented yet.
         let root = root_surface(&surface);
-        let Some(window) = window_for_root(self, &root) else {
+        let Some(id) = self
+            .core
+            .layout
+            .by_root(&root)
+            .map(|managed| return managed.id)
+        else {
             debug!("activation request for an unknown surface");
             return;
         };
         info!(?root, "activating a window on request");
-        self.core.space.raise_element(&window, true);
-        let toplevel_surface = window
-            .toplevel()
-            .map(|toplevel| return toplevel.wl_surface().clone());
-        focus_window(
-            self,
-            &window,
-            toplevel_surface,
-            SERIAL_COUNTER.next_serial(),
-        );
+        // Going through the layout restores the window if it is minimized and
+        // brings its workspace on screen.
+        crate::core::layout::LayoutManager::focus_window_id(self, id);
         self.core.queue_redraw_all();
     }
 }

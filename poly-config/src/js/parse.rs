@@ -768,6 +768,8 @@ fn parse_bind(value: &Value, path: &str, errors: &mut Errors) -> Option<(Action,
                 "focus_workspace",
                 "focus_window",
                 "move_window_to_workspace",
+                "minimize_window",
+                "restore_window",
                 "layout_action",
             ];
             ex::warn_unknown(table, path, KEYS, errors);
@@ -833,6 +835,8 @@ fn parse_inline_action(table: &Table, path: &str, errors: &mut Errors) -> Option
         "focus_workspace",
         "focus_window",
         "move_window_to_workspace",
+        "minimize_window",
+        "restore_window",
         "layout_action",
     ];
 
@@ -854,6 +858,10 @@ fn parse_inline_action(table: &Table, path: &str, errors: &mut Errors) -> Option
             "set_layout" => parse_set_layout(&value, &field_path, errors),
             "focus_workspace" => parse_workspace_index(&value, &field_path, errors, true),
             "focus_window" => parse_window_id(&value, &field_path, errors),
+            "minimize_window" => parse_optional_window_id(&value, &field_path, errors)
+                .map(|id| return Action::MinimizeWindow { id }),
+            "restore_window" => parse_optional_window_id(&value, &field_path, errors)
+                .map(|id| return Action::RestoreWindow { id }),
             "layout_action" => parse_layout_action(&value, &field_path, errors),
             _ => parse_workspace_index(&value, &field_path, errors, false),
         };
@@ -999,6 +1007,12 @@ fn parse_workspace_index(
 /// scripts; a configuration that binds it targets whatever window happened to
 /// get that id.
 fn parse_window_id(value: &Value, path: &str, errors: &mut Errors) -> Option<Action> {
+    let id = parse_window_id_number(value, path, errors)?;
+    return Some(Action::FocusWindow { id });
+}
+
+/// A window id from a binding value, shared by every action that takes one.
+fn parse_window_id_number(value: &Value, path: &str, errors: &mut Errors) -> Option<u64> {
     let Some(id) = value.as_i64() else {
         errors.error(
             path,
@@ -1010,7 +1024,23 @@ fn parse_window_id(value: &Value, path: &str, errors: &mut Errors) -> Option<Act
         errors.error(path, "window ids start at 1");
         return None;
     }
-    return Some(Action::FocusWindow { id: id as u64 });
+    return Some(id as u64);
+}
+
+/// `{ minimize_window: true }` or `{ restore_window: 3 }`.
+///
+/// `true` means the focused window (minimize) or the most recently minimized
+/// window of the active workspace (restore); a number names a window, which is
+/// only meaningful from a script because ids do not survive a restart.
+fn parse_optional_window_id(value: &Value, path: &str, errors: &mut Errors) -> Option<Option<u64>> {
+    return match value {
+        Value::Boolean(true) => Some(None),
+        Value::Boolean(false) => {
+            errors.error(path, "expected true or a window id");
+            None
+        }
+        other => Some(Some(parse_window_id_number(other, path, errors)?)),
+    };
 }
 
 fn parse_window_drag(table: &Table, errors: &mut Errors) -> WindowDrag {

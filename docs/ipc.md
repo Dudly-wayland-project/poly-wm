@@ -221,6 +221,7 @@ millihertz.
   "app_id": "foot",
   "is_focused": true,
   "is_floating": false,
+  "is_minimized": false,
   "fullscreen": null,
   "output": "eDP-1",
   "workspace": 1
@@ -234,6 +235,7 @@ millihertz.
 | `app_id` | string or null | Client app id. |
 | `is_focused` | bool | Whether the window holds keyboard focus. |
 | `is_floating` | bool | Whether the window floats above the layout. |
+| `is_minimized` | bool | Whether the window is minimized. It keeps its `workspace` and `is_floating`, but the layout does not place it and it is not drawn. Omitted by older compositors, so treat a missing field as `false`. |
 | `fullscreen` | `"Fullscreen"`, `"Windowed"` or null | Fullscreen mode. `"Windowed"` means the client believes it is fullscreen while the layout still places it. |
 | `output` | string or null | Output the window is on. |
 | `workspace` | integer or null | 1-based workspace index in that output's stack. |
@@ -341,6 +343,8 @@ Actions with fields:
 | `{"SetLayout":{"name":"dwindle"}}` | Switch the active workspace to a named layout. |
 | `{"FocusWorkspace":{"index":2}}` | Focus workspace 2 (1-based), creating it if needed. |
 | `{"FocusWindow":{"id":3}}` | Focus a window by id. Ids are valid only while this compositor process runs. |
+| `{"MinimizeWindow":{"id":3}}` or `{"MinimizeWindow":{}}` | Minimize a window by id, or the focused window. |
+| `{"RestoreWindow":{"id":3}}` or `{"RestoreWindow":{}}` | Restore and focus a window by id, or the most recently minimized window of the active workspace. |
 | `{"MoveWindowToWorkspace":{"index":2}}` | Move the focused window to workspace 2 and follow it. |
 | `{"LayoutAction":{"name":"focus-left","args":[]}}` | Invoke an action declared by the active workspace's JavaScript layout. |
 
@@ -412,7 +416,7 @@ after a client has missed events.
 | `WorkspacesChanged` | `{"workspaces":[Workspace,...]}` | Full workspace state. Sent at stream start, when the stack shape changes, or when active/focused workspaces change. |
 | `WorkspaceActiveWindowChanged` | `{"output":"eDP-1","index":1,"active_window_id":3}` | The window a workspace would focus changed. |
 | `WindowsChanged` | `{"windows":[Window,...]}` | Full window state. Sent as part of the opening snapshot; later changes use the per-window events below. |
-| `WindowOpenedOrChanged` | `{"window":Window}` | A window mapped or a non-focus property changed (title, app id, output, workspace, floating/fullscreen flags, ...). |
+| `WindowOpenedOrChanged` | `{"window":Window}` | A window mapped or a non-focus property changed (title, app id, output, workspace, floating/fullscreen/minimized flags, ...). |
 | `WindowClosed` | `{"id":3}` | A window disappeared. |
 | `WindowFocusChanged` | `{"id":3}` or `{"id":null}` | Keyboard focus moved, or was cleared. |
 | `FloatingChanged` | `{"id":3,"floating":true}` | A window started or stopped floating. |
@@ -428,8 +432,10 @@ after a client has missed events.
 `WindowOpenedOrChanged` excludes the focus flag. A focus change is a separate
 `WindowFocusChanged`; a window that starts floating also produces
 `FloatingChanged`, and a fullscreen change also produces `FullscreenChanged`.
-Consumers that need a coherent view of one object should use the event for that
-object rather than assuming multiple state slices are updated atomically.
+Minimizing and restoring a window have no dedicated event: they arrive as
+`WindowOpenedOrChanged` with `is_minimized` set. Consumers that need a coherent
+view of one object should use the event for that object rather than assuming
+multiple state slices are updated atomically.
 
 The event stream starts from a baseline kept by the compositor. A new client
 receives the current snapshot immediately, even if it connected long after
@@ -464,6 +470,8 @@ poly msg action toggle-overview
 poly msg action -- spawn foot -e top
 poly msg action focus-workspace 2
 poly msg action move-window-to-workspace 3
+poly msg action minimize-window
+poly msg action restore-window
 poly msg action layout-action focus-left
 poly msg action layout-action resize-column 0.5
 

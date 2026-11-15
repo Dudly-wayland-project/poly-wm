@@ -208,6 +208,13 @@ pub struct Window {
     pub is_focused: bool,
     /// Whether the window floats above the layout.
     pub is_floating: bool,
+    /// Whether the window is minimized.
+    ///
+    /// A minimized window keeps its workspace assignment and its place in the
+    /// window list, but the compositor does not draw it and the layout does not
+    /// place it until it is restored. Focusing it restores it.
+    #[serde(default)]
+    pub is_minimized: bool,
     /// Fullscreen mode, when the window is fullscreen.
     #[serde(default)]
     pub fullscreen: Option<FullscreenMode>,
@@ -437,6 +444,7 @@ mod tests {
             app_id: Some("foot".into()),
             is_focused: true,
             is_floating: false,
+            is_minimized: false,
             fullscreen: None,
             output: Some("winit".into()),
             workspace: Some(1),
@@ -480,6 +488,7 @@ mod tests {
         let window = serde_json::from_str::<Window>(line).unwrap();
         assert_eq!(window.title, None);
         assert_eq!(window.workspace, None);
+        assert!(!window.is_minimized);
         let line = r#"{"WindowOpenedOrChanged":{"window":{"id":1,"is_focused":false,"is_floating":false}}}"#;
         assert!(serde_json::from_str::<Event>(line).is_ok());
     }

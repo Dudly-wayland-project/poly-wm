@@ -56,6 +56,22 @@ pub fn do_action(state: &mut State, action: Action, button: Option<u32>) {
                 debug!("focus-window: there is no window with id {id}");
             }
         }
+        Action::MinimizeWindow { id } => match id {
+            Some(id) => {
+                if !crate::core::layout::LayoutManager::minimize_window(state, id) {
+                    debug!("minimize-window: window {id} cannot be minimized");
+                }
+            }
+            None => crate::core::layout::LayoutManager::minimize_focused(state),
+        },
+        Action::RestoreWindow { id } => match id {
+            Some(id) => {
+                if !crate::core::layout::LayoutManager::restore_window(state, id) {
+                    debug!("restore-window: window {id} is not minimized");
+                }
+            }
+            None => crate::core::layout::LayoutManager::restore_last_minimized(state),
+        },
 
         Action::MoveWindow => match button {
             Some(button) => start_move(state, button, None),

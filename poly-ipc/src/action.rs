@@ -51,6 +51,24 @@ pub enum Action {
         /// Stable window id, as printed by [`Request::Windows`](crate::Request::Windows).
         id: u64,
     },
+    /// Minimize the focused window, or the window with this id.
+    ///
+    /// A minimized window keeps its workspace assignment and stays in
+    /// [`Request::Windows`](crate::Request::Windows), but the layout stops
+    /// placing it and the compositor stops drawing it until it is restored.
+    /// Focusing a minimized window restores it.
+    MinimizeWindow {
+        /// Stable window id; `None` means the focused window.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<u64>,
+    },
+    /// Restore a minimized window and focus it.
+    RestoreWindow {
+        /// Stable window id; `None` means the most recently minimized window of
+        /// the active workspace.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<u64>,
+    },
 
     /// Start an interactive move of the window under the pointer.
     MoveWindow,
@@ -136,6 +154,8 @@ impl Action {
             Action::FocusUp => "focus-up",
             Action::FocusDown => "focus-down",
             Action::FocusWindow { .. } => "focus-window",
+            Action::MinimizeWindow { .. } => "minimize-window",
+            Action::RestoreWindow { .. } => "restore-window",
             Action::MoveWindow => "move-window",
             Action::ResizeWindow => "resize-window",
             Action::MoveWindowLeft => "move-window-left",
@@ -227,6 +247,12 @@ impl Action {
             "focus-window" => Action::FocusWindow {
                 id: window_id_arg(name, rest)?,
             },
+            "minimize-window" => Action::MinimizeWindow {
+                id: optional_window_id_arg(name, rest)?,
+            },
+            "restore-window" => Action::RestoreWindow {
+                id: optional_window_id_arg(name, rest)?,
+            },
             "layout-action" => {
                 let Some((action, args)) = rest.split_first() else {
                     return Err(InvalidAction {
@@ -264,6 +290,8 @@ const ARGLESS_ACTIONS: &[Action] = &[
     Action::FocusRight,
     Action::FocusUp,
     Action::FocusDown,
+    Action::MinimizeWindow { id: None },
+    Action::RestoreWindow { id: None },
     Action::MoveWindow,
     Action::ResizeWindow,
     Action::MoveWindowLeft,
@@ -323,6 +351,15 @@ fn window_id_arg(name: &str, rest: &[String]) -> Result<u64, InvalidAction> {
             name: name.to_owned(),
             hint: Some("window ids are numbers: action focus-window 3"),
         }),
+    };
+}
+
+/// A window id that may be left out: `minimize-window` alone acts on the
+/// focused window.
+fn optional_window_id_arg(name: &str, rest: &[String]) -> Result<Option<u64>, InvalidAction> {
+    return match rest {
+        [] => Ok(None),
+        _ => Ok(Some(window_id_arg(name, rest)?)),
     };
 }
 
@@ -387,6 +424,14 @@ mod tests {
             Action::ToggleFloating
         );
         assert_eq!("move-window".parse::<Action>().unwrap(), Action::MoveWindow);
+        assert_eq!(
+            "minimize-window".parse::<Action>().unwrap(),
+            Action::MinimizeWindow { id: None }
+        );
+        assert_eq!(
+            "restore-window".parse::<Action>().unwrap(),
+            Action::RestoreWindow { id: None }
+        );
     }
 
     #[test]
@@ -428,6 +473,21 @@ mod tests {
                 name: "focus-left".into(),
                 args: Vec::new(),
             }
+        );
+
+        // The optional window id is omitted when it is `None`, so the focused
+        // form stays a small object.
+        let json = serde_json::to_string(&Action::MinimizeWindow { id: Some(3) }).unwrap();
+        assert_eq!(json, r#"{"MinimizeWindow":{"id":3}}"#);
+        assert_eq!(
+            serde_json::from_str::<Action>(&json).unwrap(),
+            Action::MinimizeWindow { id: Some(3) }
+        );
+        let json = serde_json::to_string(&Action::RestoreWindow { id: None }).unwrap();
+        assert_eq!(json, r#"{"RestoreWindow":{}}"#);
+        assert_eq!(
+            serde_json::from_str::<Action>(&json).unwrap(),
+            Action::RestoreWindow { id: None }
         );
     }
 
@@ -504,6 +564,22 @@ mod tests {
             Action::FocusWindow { id: 3 }
         );
         assert_eq!(
+            parse(&["minimize-window"]).unwrap(),
+            Action::MinimizeWindow { id: None }
+        );
+        assert_eq!(
+            parse(&["minimize-window", "3"]).unwrap(),
+            Action::MinimizeWindow { id: Some(3) }
+        );
+        assert_eq!(
+            parse(&["restore-window"]).unwrap(),
+            Action::RestoreWindow { id: None }
+        );
+        assert_eq!(
+            parse(&["restore-window", "3"]).unwrap(),
+            Action::RestoreWindow { id: Some(3) }
+        );
+        assert_eq!(
             parse(&["layout-action", "focus-left"]).unwrap(),
             Action::LayoutAction {
                 name: "focus-left".into(),
@@ -526,6 +602,14 @@ mod tests {
         assert!(parse(&["focus-workspace", "x"]).unwrap_err().hint.is_some());
         assert!(parse(&["focus-window", "x"]).unwrap_err().hint.is_some());
         assert!(parse(&["focus-window"]).unwrap_err().hint.is_some());
+        assert!(parse(&["minimize-window", "x"]).unwrap_err().hint.is_some());
+        assert!(
+            parse(&["minimize-window", "1", "2"])
+                .unwrap_err()
+                .hint
+                .is_some()
+        );
+        assert!(parse(&["restore-window", "x"]).unwrap_err().hint.is_some());
         assert!(
             parse(&["close-window", "extra"])
                 .unwrap_err()

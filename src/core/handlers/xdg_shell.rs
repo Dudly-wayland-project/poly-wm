@@ -145,9 +145,9 @@ impl XdgShellHandler for State {
         crate::core::popups::start_popup_grab(self, surface, &seat, serial);
     }
 
-    // Maximize and minimize are not implemented: acknowledge them with a
-    // configure that does not set the state, so clients are not left waiting.
-    // Tiling and fullscreen are owned by the layout engine.
+    // Maximize is not implemented: acknowledge it with a configure that does not
+    // set the state, so clients are not left waiting. Tiling and fullscreen are
+    // owned by the layout engine.
     fn maximize_request(&mut self, surface: ToplevelSurface) {
         surface.send_configure();
     }
@@ -170,7 +170,22 @@ impl XdgShellHandler for State {
         LayoutManager::set_fullscreen_for_root(self, &root, None);
     }
 
+    /// The client asked to be minimized (usually a titlebar button).
+    ///
+    /// xdg-shell has no `Minimized` state: the request is acknowledged with a
+    /// configure and the compositor hides the window itself, the same way
+    /// `minimize-window` does.
     fn minimize_request(&mut self, surface: ToplevelSurface) {
+        let Some(id) = self
+            .core
+            .layout
+            .by_root(surface.wl_surface())
+            .map(|managed| return managed.id)
+        else {
+            surface.send_configure();
+            return;
+        };
+        LayoutManager::minimize_window(self, id);
         surface.send_configure();
     }
 }

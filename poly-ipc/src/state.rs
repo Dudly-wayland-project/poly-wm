@@ -332,6 +332,7 @@ mod tests {
             app_id: None,
             is_focused: false,
             is_floating: false,
+            is_minimized: false,
             fullscreen: None,
             output: Some("winit".into()),
             workspace: Some(1),

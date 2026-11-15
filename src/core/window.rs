@@ -81,17 +81,16 @@ pub fn send_scale(surface: &WlSurface, scale: smithay::output::Scale) {
 }
 
 /// Find the toplevel window whose root surface is `root`.
+///
+/// The layout's root table is the source of truth, not the space: a minimized
+/// window keeps its mapping state but is deliberately absent from the space, and
+/// its commits, title changes and teardown must still reach the layout.
 pub fn window_for_root(state: &State, root: &WlSurface) -> Option<Window> {
     return state
         .core
-        .space
-        .elements()
-        .find(|window| {
-            return window
-                .toplevel()
-                .is_some_and(|toplevel| return toplevel.wl_surface() == root);
-        })
-        .cloned();
+        .layout
+        .by_root(root)
+        .map(|managed| return managed.window.clone());
 }
 
 /// React to a commit of a root surface: map, unmap or just repaint.
@@ -400,6 +399,11 @@ pub(crate) fn take_closing_snapshot(
     let now = std::time::Instant::now();
     let (id, output, workspace, tiled, fullscreen, rect, alpha, open_scale, visuals, window) = {
         let managed = state.core.layout.by_root(root)?;
+        // A minimized window is not on screen: there is no frame to bake, and
+        // closing it must not pop a snapshot out of nowhere.
+        if managed.minimized {
+            return None;
+        }
         let output = managed.output.clone()?;
         let (_, workspace) = state.core.layout.workspace_of(managed.id)?;
         (

@@ -89,13 +89,16 @@ pub fn workspaces(state: &State) -> Vec<Workspace> {
 ///
 /// On the focused workspace that is the real keyboard focus; elsewhere it is the
 /// window the workspace remembers, falling back to the topmost one so that a
-/// status bar shows something sensible.
+/// status bar shows something sensible. Minimized windows are skipped: they are
+/// not on screen, so a taskbar must not highlight them.
 fn active_window(
     workspace: &crate::core::layout::WorkspaceSnapshot,
     focused: Option<u64>,
 ) -> Option<u64> {
-    let contains =
-        |id: u64| return workspace.tiled.contains(&id) || workspace.floating.contains(&id);
+    let visible = |id: &u64| return !workspace.minimized.contains(id);
+    let contains = |id: u64| {
+        return (workspace.tiled.contains(&id) || workspace.floating.contains(&id)) && visible(&id);
+    };
     if let Some(id) = focused.filter(|id| return contains(*id)) {
         return Some(id);
     }
@@ -104,9 +107,11 @@ fn active_window(
     }
     return workspace
         .floating
-        .last()
-        .or_else(|| return workspace.tiled.last())
-        .copied();
+        .iter()
+        .rev()
+        .chain(workspace.tiled.iter().rev())
+        .copied()
+        .find(|id| return visible(id));
 }
 
 /// The managed windows, back to front per output.
@@ -148,6 +153,7 @@ fn window(state: &State, id: u64, focused: Option<u64>) -> Option<Window> {
         app_id: snapshot.app_id,
         is_focused: focused == Some(id),
         is_floating: !snapshot.tiled,
+        is_minimized: snapshot.minimized,
         fullscreen: snapshot.fullscreen.map(fullscreen_of),
         output: snapshot.output.map(|output| return output.name()),
         // 1-based on the wire.
@@ -349,6 +355,7 @@ fn same_window(a: &Window, b: &Window) -> bool {
         && a.title == b.title
         && a.app_id == b.app_id
         && a.is_floating == b.is_floating
+        && a.is_minimized == b.is_minimized
         && a.fullscreen == b.fullscreen
         && a.output == b.output
         && a.workspace == b.workspace;

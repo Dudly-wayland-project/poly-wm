@@ -512,6 +512,8 @@ Actions without arguments:
 | `reload-config` | Reload the configuration from disk. |
 | `focus-next`, `focus-prev` | Cycle through windows. |
 | `focus-left`, `focus-right`, `focus-up`, `focus-down` | Focus a neighbouring window. |
+| `minimize-window` | Minimize the focused window. |
+| `restore-window` | Restore the most recently minimized window of the active workspace and focus it. |
 | `move-window` | Start an interactive move of the window under the pointer. |
 | `resize-window` | Start an interactive resize of the window under the pointer. |
 | `move-window-left`, `move-window-right`, `move-window-up`, `move-window-down` | Move the focused window in the layout. |
@@ -539,7 +541,15 @@ Actions with arguments are written as objects:
 | `{ set_layout: "name" }` | Switch the active workspace to a named layout. |
 | `{ focus_workspace: 2 }` | Focus workspace 2 (1-based, 1-512), creating it when needed. |
 | `{ focus_window: 3 }` | Focus a window by its runtime id. Mostly useful from scripts. |
+| `{ minimize_window: true }` | Minimize the focused window. `{ minimize_window: 3 }` minimizes a window by id. |
+| `{ restore_window: true }` | Restore and focus the most recently minimized window of the active workspace. `{ restore_window: 3 }` restores a window by id. |
 | `{ move_window_to_workspace: 2 }` | Move the focused window to workspace 2 and follow it. |
+
+A minimized window keeps its workspace, its position in the layout and its
+entry in the IPC window list, but the compositor stops drawing it and the layout
+reflows over its slot. Focusing it (from a taskbar, a keybinding or
+`focus-window`) restores it. Closing a minimized window skips the close
+animation, because there is no last frame to animate from.
 
 ## `window_drag`
 
