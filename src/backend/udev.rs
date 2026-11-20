@@ -744,21 +744,54 @@ impl Udev {
         let outcome = {
             let now = core.begin_frame(output);
             let background = core
-                .output_background(output)
-                .map(|color| return color.to_floats())
+                .fullscreen_clear(output)
+                .or_else(|| {
+                    return core
+                        .output_background(output)
+                        .map(|color| return color.to_floats());
+                })
                 .unwrap_or([0.0, 0.0, 0.0, 1.0]);
             let elements =
                 render::output_elements(core, &mut renderer, output, true, now, background);
 
-            // The compositor never scans out client buffers directly: it renders
-            // into its own swapchain and scans that out. This keeps the element
-            // handling simple and always correct.
-            let frame_mode = FrameFlags::empty();
+            // Direct scan-out is offered only for frames that can actually use
+            // it: a single fullscreen window with nothing composited over or
+            // under it (`render::may_scan_out`). The DRM compositor checks the
+            // same conditions again and falls back to rendering when they do not
+            // hold, so a wrong answer here only costs a failed attempt. Passing
+            // the flag unconditionally would leave every composited frame
+            // paying for that attempt.
+            let output_geometry = core.space.output_geometry(output);
+            let scanout_possible = output_geometry.is_some_and(|geometry| {
+                return render::may_scan_out(
+                    &elements,
+                    geometry,
+                    output.current_scale().fractional_scale(),
+                );
+            });
+            let mut frame_flags = FrameFlags::empty();
+            if scanout_possible {
+                // `ANY` because the client's buffer format rarely matches the
+                // swapchain's: requiring an exact match would make scan-out
+                // succeed only for the format we happen to allocate.
+                frame_flags.insert(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY);
+            }
+            // A hardware cursor plane keeps the pointer from forcing a full
+            // composite of the frame it moves across. The cursor element is
+            // pushed first, i.e. it is already on top of everything, which is
+            // the only placement the plane can express; whether it fits and
+            // which plane to use is the DRM compositor's call.
+            if matches!(elements.first(), Some(render::OutputElements::Cursor(_))) {
+                frame_flags.insert(FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT);
+            }
+            if core.config.general.enable_overlay_planes {
+                frame_flags.insert(FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT);
+            }
             match output_device.drm_output.render_frame(
                 &mut renderer,
                 &elements,
                 background,
-                frame_mode,
+                frame_flags,
             ) {
                 Ok(result) => {
                     if result.needs_sync() {

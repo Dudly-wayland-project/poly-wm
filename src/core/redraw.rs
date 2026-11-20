@@ -242,6 +242,11 @@ impl State {
             self.core.queue_redraw_all();
         }
 
+        // The capture element lists were built from this iteration's state and
+        // are only valid until the next one starts changing things.
+        self.core.capture_elements.clear();
+        self.core.capture_elements_background.clear();
+
         if let Err(err) = self.core.display_handle.flush_clients() {
             debug!("error flushing wayland clients: {err}");
         }

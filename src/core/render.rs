@@ -315,20 +315,15 @@ where
             false,
             xray.as_ref(),
         );
-        let buffer = core
-            .fullscreen_backgrounds
-            .entry(output.clone())
-            .or_insert_with(|| {
-                return SolidColorBuffer::new(output_geometry.size, [0.0, 0.0, 0.0, 1.0]);
-            });
-        buffer.update(output_geometry.size, [0.0, 0.0, 0.0, 1.0]);
-        elements.push(OutputElements::Solid(SolidColorRenderElement::from_buffer(
-            buffer,
-            (0, 0),
-            scale,
-            1.0,
-            Kind::Unspecified,
-        )));
+        // No solid backdrop is pushed below a fullscreen window. Its content has
+        // to be hidden while the client has not painted yet, and that used to be
+        // a black element here — but a solid element is the bottom of the stack,
+        // and the DRM plane assignment only tries direct scan-out on the bottom
+        // element, so the backdrop alone made a fullscreen window unscannable.
+        //
+        // `Core::fullscreen_clear` gives the backend the same guarantee through
+        // the clear colour, which is what a clear colour is for. Keeping the
+        // window as the bottom-most element is what lets the plane carry it.
     }
 
     if cover_top {
@@ -509,6 +504,79 @@ where
             0
         },
     };
+}
+
+/// Whether the primary plane could show this frame without compositing.
+///
+/// The DRM compositor only tries direct scan-out on the *last* element (the one
+/// at the bottom of the stack) when it covers the whole output, and its own
+/// checks then reject anything without a scannable buffer behind it: a blur, a
+/// shader, a rounded corner or an animated scale all mean the bottom layer has
+/// to be composited. This function answers the same question one step earlier,
+/// so the backend can pass [`FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT`] only when
+/// it can actually succeed.
+///
+/// Passing the flag unconditionally would not be a correctness problem — the
+/// compositor falls back to rendering — but it would hide the reason a frame is
+/// not being scanned out, and it would make the cost of a failed attempt part of
+/// every frame.
+///
+/// The cheap structural test is deliberate: everything expensive (whether the
+/// buffer is importable, whether the format matches a plane) belongs to the DRM
+/// compositor, which has the information.
+pub fn may_scan_out<R: PolyRenderer>(
+    elements: &[OutputElements<R>],
+    output_geometry: Rectangle<i32, Logical>,
+    scale: f64,
+) -> bool {
+    // Front to back, so the bottom-most element is the last one.
+    let Some(bottom) = elements.last() else {
+        return false;
+    };
+    if !matches!(bottom, OutputElements::Window(_)) {
+        // Layers, Toasts, closing snapshots, the lock background and the solid
+        // backdrop are all composited by definition.
+        return false;
+    }
+    // The cursor sits on top and is scanned out on the cursor plane separately,
+    // so it does not disqualify the window below it.
+    if !elements.iter().all(|element| {
+        return matches!(
+            element,
+            OutputElements::Window(_) | OutputElements::Cursor(_)
+        );
+    }) {
+        return false;
+    }
+    // The same test the DRM compositor makes: the element's geometry minus its
+    // opaque regions must be empty, and it has to span the whole output.
+    let physical = Scale::from(scale);
+    let geometry = Element::geometry(bottom, physical);
+    let opaque = Element::opaque_regions(bottom, physical);
+    return covers_output_opaque(
+        geometry,
+        opaque.iter().copied(),
+        Rectangle::from_size(output_geometry.size.to_physical_precise_round(scale)),
+    );
+}
+
+/// Whether an element covers `output` and leaves nothing translucent in it.
+///
+/// Split out of [`may_scan_out`] because it is the part worth testing on its
+/// own: the element list cannot be built without a renderer, but this decision
+/// is pure geometry.
+fn covers_output_opaque(
+    geometry: Rectangle<i32, Physical>,
+    opaque: impl Iterator<Item = Rectangle<i32, Physical>>,
+    output: Rectangle<i32, Physical>,
+) -> bool {
+    if !geometry.contains_rect(output) {
+        return false;
+    }
+    let mut remaining = vec![geometry];
+    remaining = Rectangle::subtract_rects_many_in_place(remaining, opaque);
+    // Any part that is not opaque would show the background through it.
+    return remaining.is_empty();
 }
 
 /// Scale a rectangle around its centre, rounding to whole logical pixels.
@@ -1579,6 +1647,10 @@ pub fn snapshot_window(
 
 /// Render one frame of `output` into a client's shm buffer.
 ///
+/// The element list for a capture is built through
+/// [`capture_output_elements`], which reuses the list another session built for
+/// the same output during this event loop iteration.
+///
 /// This is the compositor side of `ext-image-copy-capture-v1` (`grim`,
 /// `wl-mirror`, a portal screencast, ...). `buffer` is the one the client
 /// attached to its capture frame; it has to match what the session announced
@@ -1626,21 +1698,63 @@ pub fn capture_output(
     // The element list needs `&mut Core` and the renderer, so it is built
     // before the session is borrowed: `CaptureState` is a separate field of
     // `State` for exactly this reason (`handlers/image_copy_capture.rs`).
-    let background = core
-        .output_background(output)
-        .map(|color| return color.to_floats())
-        .unwrap_or([0.0, 0.0, 0.0, 1.0]);
-    let elements = output_elements(
-        core,
-        renderer,
-        output,
-        draw_cursor,
-        Instant::now(),
-        background,
-    );
+    let (background, elements) = capture_elements(core, renderer, output, draw_cursor);
 
     let session = capture.session(key, renderer, size, scale.into())?;
     return session.capture_frame(renderer, &elements, background, buffer);
+}
+
+/// The background colour and element list a capture of `output` draws.
+///
+/// Building the list walks the whole space and re-runs every per-window cache.
+/// When several sessions capture the same output in one event loop iteration
+/// (`grim` taking a shot while a portal screencast runs, or a mirror next to
+/// either) the list is identical, so it is built once and shared. The cache is
+/// keyed by output and by whether the pointer is included, and is dropped at the
+/// end of the iteration, because the next one may change anything it was built
+/// from.
+fn capture_elements(
+    core: &mut Core,
+    renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+    output: &Output,
+    draw_cursor: bool,
+) -> (
+    [f32; 4],
+    Rc<[OutputElements<smithay::backend::renderer::gles::GlesRenderer>]>,
+) {
+    // The same colour the backends clear with, so a capture shows what the
+    // output shows: a fullscreen window's frame is black below it, not whatever
+    // the wallpaper is.
+    let background = core
+        .fullscreen_clear(output)
+        .or_else(|| {
+            return core
+                .output_background(output)
+                .map(|color| return color.to_floats());
+        })
+        .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+    let key = (output.clone(), draw_cursor);
+    // A background change is part of the list's meaning (the xray capture
+    // repaints it), so it is folded into the lookup instead of the key: the
+    // colour is cheap to recompute and comparing it keeps the key hashable.
+    if let Some(cached) = core.capture_elements.get(&key) {
+        if core.capture_elements_background.get(&key) == Some(&background) {
+            return (background, cached.clone());
+        }
+    }
+    let elements: Rc<[OutputElements<smithay::backend::renderer::gles::GlesRenderer>]> =
+        output_elements(
+            core,
+            renderer,
+            output,
+            draw_cursor,
+            Instant::now(),
+            background,
+        )
+        .into();
+    core.capture_elements.insert(key.clone(), elements.clone());
+    core.capture_elements_background.insert(key, background);
+    return (background, elements);
 }
 
 /// Render one frame of `output` and copy `src` out of it into a client's shm
@@ -1679,19 +1793,9 @@ pub fn capture_region(
     let scale = output.current_scale().fractional_scale();
     // The element list needs `&mut Core` and the renderer, so it is built before
     // the target is borrowed (`handlers/screencopy.rs` destructures `State` for
-    // the same reason).
-    let background = core
-        .output_background(output)
-        .map(|color| return color.to_floats())
-        .unwrap_or([0.0, 0.0, 0.0, 1.0]);
-    let elements = output_elements(
-        core,
-        renderer,
-        output,
-        draw_cursor,
-        Instant::now(),
-        background,
-    );
+    // the same reason). Shared with any capture session of the same output that
+    // ran in this iteration.
+    let (background, elements) = capture_elements(core, renderer, output, draw_cursor);
 
     let target = capture.screencopy_target(
         renderer,
@@ -1804,6 +1908,66 @@ mod tests {
 
     fn rect(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Logical> {
         return Rectangle::new(Point::from((x, y)), Size::from((w, h)));
+    }
+
+    fn physical(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Physical> {
+        return Rectangle::new(Point::from((x, y)), Size::from((w, h)));
+    }
+
+    #[test]
+    fn a_fully_opaque_element_covering_the_output_can_be_scanned_out() {
+        let output = physical(0, 0, 1920, 1080);
+        assert!(covers_output_opaque(
+            physical(0, 0, 1920, 1080),
+            [physical(0, 0, 1920, 1080)].into_iter(),
+            output,
+        ));
+    }
+
+    #[test]
+    fn an_element_that_does_not_span_the_output_cannot_be_scanned_out() {
+        // A windowed application is composited over the wallpaper, so there is
+        // no single buffer the plane could carry.
+        let output = physical(0, 0, 1920, 1080);
+        assert!(!covers_output_opaque(
+            physical(100, 100, 800, 600),
+            [physical(100, 100, 800, 600)].into_iter(),
+            output,
+        ));
+    }
+
+    #[test]
+    fn a_translucent_part_blocks_scan_out() {
+        // Rounded corners and a window shader both end up here: part of the
+        // rectangle is not opaque, so the background shows through and the
+        // frame has to be composited.
+        let output = physical(0, 0, 1920, 1080);
+        assert!(!covers_output_opaque(
+            physical(0, 0, 1920, 1080),
+            [physical(0, 0, 1920, 1000)].into_iter(),
+            output,
+        ));
+    }
+
+    #[test]
+    fn an_element_that_declares_no_opaque_regions_is_not_scanned_out() {
+        // A window drawn through the window shader reports no opaque regions at
+        // all, and `Rectangle::subtract_rects_many_in_place` treats "nothing
+        // subtracted" as "the whole rectangle is still there". That is the right
+        // answer: an element that does not say which parts are opaque may be
+        // translucent anywhere, so it has to be composited.
+        let output = physical(0, 0, 100, 100);
+        assert!(!covers_output_opaque(
+            physical(0, 0, 100, 100),
+            std::iter::empty(),
+            output,
+        ));
+        // One pixel short of opaque is enough to block it.
+        assert!(!covers_output_opaque(
+            physical(0, 0, 100, 100),
+            [physical(0, 0, 100, 99)].into_iter(),
+            output,
+        ));
     }
 
     #[test]

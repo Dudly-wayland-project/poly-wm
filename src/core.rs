@@ -36,6 +36,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use poly_config::{Config, ConfigSource, Keybind, LayoutPrograms, ModKey};
 use smithay::backend::renderer::element::solid::SolidColorBuffer;
+use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::desktop::{
     PopupManager, Space, Window, WindowSurfaceType, layer_map_for_output,
     utils::under_from_surface_tree,
@@ -360,8 +361,6 @@ pub struct Core {
     pub lock_rendered_outputs: HashSet<Output>,
     /// The solid background drawn below lock surfaces, per output.
     pub lock_backgrounds: HashMap<Output, SolidColorBuffer>,
-    /// The black backdrop behind compositor-managed fullscreen windows.
-    pub fullscreen_backgrounds: HashMap<Output, SolidColorBuffer>,
     /// Cached solid buffers for the tiled drag drop indicator.
     pub drag_hint_buffers: Option<DragHintBuffers>,
     /// The shared xray backdrop of every output, when `general.blur.xray` is on.
@@ -377,6 +376,29 @@ pub struct Core {
     pub continuous_redraw: bool,
     /// Bumped on every configuration reload, so shaders recompile lazily.
     pub config_generation: u64,
+    /// The element list a capture session built during the current event loop
+    /// iteration, so the sessions that come after it can reuse it.
+    ///
+    /// Building the list walks the whole space and re-runs every per-window
+    /// cache, which is the expensive part of a frame. Several capture sessions
+    /// asking for the same output inside one iteration (`grim`, a portal
+    /// screencast and a mirror can all be live) would otherwise pay for it once
+    /// each. Cleared at the end of the iteration
+    /// (`State::refresh_and_flush_clients`), because the next one may change
+    /// anything the list was built from.
+    ///
+    /// Keyed by output and cursor inclusion: a screenshot with the pointer and a
+    /// recording without it are different lists.
+    pub capture_elements:
+        HashMap<(Output, bool), Rc<[crate::core::render::OutputElements<GlesRenderer>]>>,
+
+    /// The background colour each cached capture list in
+    /// [`Core::capture_elements`] was built with.
+    ///
+    /// The colour is part of the list's meaning (the xray capture repaints it
+    /// before taking its snapshot), and it is cheap to recompute, so it is
+    /// compared on lookup instead of being part of the key.
+    pub capture_elements_background: HashMap<(Output, bool), [f32; 4]>,
 }
 
 /// The cached drag-and-drop indicator: a translucent rounded slot and its
@@ -686,7 +708,6 @@ impl Core {
             lock_surfaces: Vec::new(),
             lock_rendered_outputs: HashSet::new(),
             lock_backgrounds: HashMap::new(),
-            fullscreen_backgrounds: HashMap::new(),
             drag_hint_buffers: None,
             xray_buffers: HashMap::new(),
             shaders: crate::core::render::Shaders::new(),
@@ -694,6 +715,8 @@ impl Core {
             toasts: crate::core::ui::Toasts::new(),
             continuous_redraw: false,
             config_generation: 0,
+            capture_elements: HashMap::new(),
+            capture_elements_background: HashMap::new(),
         });
     }
 
@@ -916,6 +939,28 @@ impl Core {
             .output_state
             .get(output)
             .and_then(|state| return state.background);
+    }
+
+    /// The colour the backend must clear `output` to for this frame.
+    ///
+    /// A compositor-managed fullscreen window has to hide whatever is behind it,
+    /// including a client that has not painted its first frame yet. That used to
+    /// be a black [`SolidColorBuffer`](smithay::backend::renderer::element::solid::SolidColorBuffer)
+    /// pushed below the window, but a solid element occupies the bottom of the
+    /// stack, and the DRM plane assignment only ever tries direct scan-out on the
+    /// bottom-most element — so the backdrop alone made a fullscreen window
+    /// impossible to scan out.
+    ///
+    /// Clearing is what the backend already does and what a clear colour is for,
+    /// so the backdrop is expressed as "clear to black" instead: the window
+    /// becomes the bottom-most element and the plane can carry its buffer.
+    ///
+    /// Returns `None` when the output's configured background should be used.
+    pub fn fullscreen_clear(&self, output: &Output) -> Option<[f32; 4]> {
+        if !self.layout.has_fullscreen_on(output) {
+            return None;
+        }
+        return Some([0.0, 0.0, 0.0, 1.0]);
     }
 
     /// Queue a redraw of one output.

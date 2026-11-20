@@ -137,6 +137,7 @@ fn parse_general(table: &Table, root: &Path, errors: &mut Errors) -> General {
             "opacity",
             "window_shader",
             "cursor",
+            "enable_overlay_planes",
         ],
         errors,
     );
@@ -183,6 +184,9 @@ fn parse_general(table: &Table, root: &Path, errors: &mut Errors) -> General {
     }
     if let Some(value) = ex::string(table, "window_shader", "general", errors) {
         general.window_shader = Some(resolve_path(Some(root), &value).display().to_string());
+    }
+    if let Some(value) = ex::boolean(table, "enable_overlay_planes", "general", errors) {
+        general.enable_overlay_planes = value;
     }
     if let Some(t) = ex::table(table, "cursor", "general", errors) {
         general.cursor = parse_cursor(&t, errors);

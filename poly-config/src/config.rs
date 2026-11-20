@@ -188,6 +188,17 @@ pub struct General {
     pub window_shader: Option<String>,
     /// The software cursor the compositor draws.
     pub cursor: Cursor,
+    /// Allow scan-out on DRM overlay planes.
+    ///
+    /// Off by default: many drivers advertise overlay planes that work, but a
+    /// fair number misbehave in ways that are hard to notice until a window
+    /// flickers on one. When it works it lets a second plane carry a layer
+    /// surface or a second window without the primary plane being composited,
+    /// which is worth the experiment on a known-good machine.
+    ///
+    /// Only the native (`udev`) backend has planes; the setting does nothing
+    /// when nested.
+    pub enable_overlay_planes: bool,
 }
 
 impl Default for General {
@@ -203,6 +214,7 @@ impl Default for General {
             opacity: 1.0,
             window_shader: None,
             cursor: Cursor::default(),
+            enable_overlay_planes: false,
         };
     }
 }

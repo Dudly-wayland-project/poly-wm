@@ -259,8 +259,12 @@ impl Winit {
             };
 
             let background = core
-                .output_background(&self.output)
-                .map(|color| return color.to_floats())
+                .fullscreen_clear(&self.output)
+                .or_else(|| {
+                    return core
+                        .output_background(&self.output)
+                        .map(|color| return color.to_floats());
+                })
                 .unwrap_or([0.1, 0.1, 0.1, 1.0]);
             let elements =
                 render::output_elements(core, renderer, &self.output, true, now, background);

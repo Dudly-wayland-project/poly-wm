@@ -37,7 +37,7 @@ use smithay::wayland::image_copy_capture::{
 use tracing::{debug, info, warn};
 
 use crate::core::Core;
-use crate::core::capture::CaptureKey;
+use crate::core::capture::{CaptureKey, CaptureOutcome};
 use crate::state::State;
 
 impl ImageCaptureSourceHandler for State {}
@@ -119,6 +119,20 @@ impl ImageCopyCaptureHandler for State {
                 return Err(anyhow::anyhow!("no renderer for output {}", output.name()));
             });
         match captured {
+            Ok(CaptureOutcome::Deferred) => {
+                // The pixels are copied out but still on the GPU. Holding the
+                // frame is what lets `success` be sent once they land instead of
+                // blocking the event loop until the fence signals; the protocol
+                // does not bound how soon `ready` follows `capture`.
+                self.capture.waiting.insert(
+                    key,
+                    crate::core::capture::WaitingFrame {
+                        frame,
+                        output: output.clone(),
+                        timestamp: core.monotonic_now(),
+                    },
+                );
+            }
             Ok(outcome) => {
                 debug!(
                     output = output.name(),
@@ -230,6 +244,12 @@ impl ImageCopyCaptureHandler for State {
 
     fn session_destroyed(&mut self, session: SessionRef) {
         if let Some(key) = session.user_data().get::<CaptureKey>().copied() {
+            // A frame whose readback was still queued can never be completed
+            // now; dropping it without `success` would leave the client waiting
+            // for a `ready`, so it is failed explicitly.
+            if let Some(waiting) = self.capture.waiting.remove(&key) {
+                waiting.frame.fail(CaptureFailureReason::Unknown);
+            }
             self.capture.remove(key);
         }
         self.core
@@ -284,6 +304,12 @@ fn output_constraints(output: &Output) -> Option<BufferConstraints> {
 /// only borrow `&mut Core`, and the capture state (per-session offscreen
 /// textures) lives on `State`.
 pub(crate) fn refresh_sessions(state: &mut State) {
+    // Frames whose readback was queued on the GPU: land the ones the GPU has
+    // finished with and keep the rest for the next iteration. This runs before
+    // the stop/resize bookkeeping below, so a frame that is due is reported
+    // before its output can be torn down under it.
+    finish_deferred_frames(state);
+
     let mut stopped = Vec::new();
     let mut resized = Vec::new();
     for (index, session) in state.core.image_copy_sessions.iter().enumerate() {
@@ -322,8 +348,79 @@ pub(crate) fn refresh_sessions(state: &mut State) {
     // flight. The per-session capture state stays until `session_destroyed`, so
     // a client that still destroys its session object releases the texture.
     for (index, name) in stopped.into_iter().rev() {
+        // A queued readback belongs to a frame this session will never answer;
+        // it has to be failed before the session value is dropped, because that
+        // is what makes the protocol object go away.
+        if let Some(key) = state
+            .core
+            .image_copy_sessions
+            .get(index)
+            .and_then(|session| return session.user_data().get::<CaptureKey>().copied())
+        {
+            if let Some(waiting) = state.capture.waiting.remove(&key) {
+                waiting.frame.fail(CaptureFailureReason::Unknown);
+            }
+        }
         state.core.image_copy_sessions.remove(index);
         info!("stopped a capture session for {name}");
+    }
+}
+
+/// Where the pointer hotspot sits on `output`, in buffer pixels.
+///
+/// Land every capture frame whose readback the GPU finished.
+///
+/// A frame that is not ready stays in [`CaptureState::waiting`] and is retried on
+/// the next iteration; one whose session went away is failed, because its pixels
+/// can never be completed.
+fn finish_deferred_frames(state: &mut State) {
+    if state.capture.waiting.is_empty() {
+        return;
+    }
+    let keys: Vec<_> = state.capture.waiting.keys().copied().collect();
+    for key in keys {
+        let Some(waiting) = state.capture.waiting.get(&key) else {
+            continue;
+        };
+        let output = waiting.output.clone();
+        let timestamp = waiting.timestamp;
+        let landed = {
+            let State {
+                backend,
+                core: _,
+                capture,
+            } = state;
+            backend
+                .with_gles_renderer_for_output(&output, |renderer| {
+                    return capture.finish_session_readback(key, renderer);
+                })
+                .unwrap_or_else(|| {
+                    return Err(anyhow::anyhow!("no renderer for output {}", output.name()));
+                })
+        };
+        match landed {
+            // Still queued: try again next iteration.
+            Ok(None) => continue,
+            Ok(Some(outcome)) => {
+                let Some(waiting) = state.capture.waiting.remove(&key) else {
+                    continue;
+                };
+                debug!(
+                    output = output.name(),
+                    ?outcome,
+                    "landed a deferred capture frame"
+                );
+                waiting
+                    .frame
+                    .success(Transform::Normal, outcome.frame_damage(), timestamp);
+            }
+            Err(err) => {
+                warn!("error landing a capture frame on {}: {err}", output.name());
+                if let Some(waiting) = state.capture.waiting.remove(&key) {
+                    waiting.frame.fail(CaptureFailureReason::Unknown);
+                }
+            }
+        }
     }
 }
 

@@ -161,6 +161,7 @@ config({
     cursor: {
       /* … */
     },
+    enable_overlay_planes: false,
   },
 });
 ```
@@ -172,6 +173,32 @@ config({
 | `gap` | `8` | Gap in logical pixels. Layer-shell exclusive zones and this inset define the layout work area; layouts normally use `ctx.gap` between windows. Range: 0-512. |
 | `opacity` | `1.0` | Default window opacity. Range: 0.0-1.0. |
 | `window_shader` | unset | Path to a GLSL fragment shader used for every window. Relative paths resolve against the root `config.js`, not an included file. |
+| `enable_overlay_planes` | `false` | Let the DRM backend hand elements to overlay planes instead of compositing them onto the primary plane. Off by default: plane behaviour varies by driver and a misbehaving plane shows up as flicker or a stuck strip rather than an error. Enable it to experiment on a known-good machine. Only meaningful on the native backend; ignored when nested under another compositor. |
+
+### Scan-out
+
+The DRM backend scans out directly whenever it can, without a setting: a frame
+whose only content is one fullscreen window that covers the output opaquely is
+handed to the primary plane as the client's own buffer, and the pointer goes to
+a hardware cursor plane when the cursor is the topmost element. Everything else
+— windowed layouts, rounded corners, borders, shadows, blur, Toasts, layer
+surfaces, transitions — is composited into the swapchain as usual.
+
+A few consequences worth knowing:
+
+- A compositor-managed fullscreen window gets scan-out; its opening animation,
+  border, shadow and blur backdrop are all skipped while it is fullscreen, which
+  is exactly what makes it scannable.
+- A fullscreen window is drawn over a black background, but that background is
+  the frame's *clear colour* rather than a solid element. It has to be there so a
+  client that has not painted its first frame cannot leak the session content
+  behind it, and a clear colour provides the same guarantee without occupying a
+  slot in the element stack — a solid element would sit below the window and be
+  the only element the plane assignment considers.
+- Toggling `general.border`, `general.shadow` or a `window_shader` does not
+  affect a fullscreen window, so it does not affect scan-out either.
+- Screenshot and screencast frames use the same clear colour, so a capture of a
+  fullscreen window shows the same black background the output shows.
 
 ### `general.animations`
 

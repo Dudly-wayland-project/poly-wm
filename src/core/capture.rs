@@ -46,7 +46,9 @@
 //! would cost more than the capture itself. [`ScreencopyTarget`] holds one of
 //! those per output.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+
+mod readback;
 
 use anyhow::Context;
 use smithay::backend::allocator::Fourcc;
@@ -69,7 +71,13 @@ use crate::core::render::OutputElements;
 /// individually. Real clients use two or three; a client that keeps allocating
 /// new ones would otherwise grow the map without bound, and every unknown buffer
 /// costs a full readback anyway.
-const MAX_TRACKED_BUFFERS: usize = 8;
+///
+/// Forgetting a buffer is expensive: the next frame it is handed to us in has
+/// never been written, so it needs every pixel. That is why the tracked set is
+/// sized for the largest realistic rotation (a client with a deep swapchain)
+/// and why forgetting does not simply drop the knowledge of what changed — see
+/// [`SessionCapture::forget_oldest_buffer`].
+const MAX_TRACKED_BUFFERS: usize = 12;
 
 /// More damage rectangles than this are read back as one bounding box: the cost
 /// of a readback is dominated by the `glReadPixels` call itself (it stalls the
@@ -98,6 +106,23 @@ pub struct CaptureState {
     /// pile up full-screen textures.
     screencopy: HashMap<String, ScreencopyTarget>,
     next_key: u64,
+    /// Frames whose readback is queued on the GPU, keyed by session.
+    ///
+    /// The protocol object has to be held until the pixels land, because
+    /// `success` is what tells the client its buffer is complete. Keying by
+    /// session lets the event loop finish them without knowing which protocol
+    /// object produced them.
+    pub waiting: HashMap<CaptureKey, WaitingFrame>,
+}
+
+/// A frame object held until its readback lands.
+pub struct WaitingFrame {
+    /// The frame whose `success` is still to be sent.
+    pub frame: smithay::wayland::image_copy_capture::Frame,
+    /// The output it captures, so the right renderer is used.
+    pub output: smithay::output::Output,
+    /// The presentation timestamp the frame started at.
+    pub timestamp: std::time::Duration,
 }
 
 impl CaptureState {
@@ -146,6 +171,22 @@ impl CaptureState {
 
     /// The screencopy target for `output`, (re)created when the output changed
     /// size or scale.
+    /// Land a session's deferred readback if its fence has signaled.
+    ///
+    /// `Ok(None)` means "not yet"; the caller retries on a later iteration.
+    pub fn finish_session_readback(
+        &mut self,
+        key: CaptureKey,
+        renderer: &mut GlesRenderer,
+    ) -> anyhow::Result<Option<CaptureOutcome>> {
+        let Some(session) = self.sessions.get_mut(&key) else {
+            anyhow::bail!("the capture session vanished while its readback was queued");
+        };
+        return session.finish_deferred(renderer);
+    }
+
+    /// The screencopy target for `output`, (re)created when the output changed
+    /// size or scale.
     ///
     /// Unlike a session, a target is not keyed by protocol object: a screencopy
     /// frame is one copy and then gone, and the clients that matter (`grim`,
@@ -189,6 +230,10 @@ pub enum CaptureOutcome {
     Damage(Vec<Rectangle<i32, Buffer>>),
     /// Nothing changed and the buffer is still current.
     Unchanged,
+    /// The pixels are copied out but still on the GPU: the frame has to wait for
+    /// its fence and the session lands the readback later
+    /// ([`SessionCapture::finish_deferred`]).
+    Deferred,
 }
 
 impl CaptureOutcome {
@@ -204,7 +249,69 @@ impl CaptureOutcome {
             Self::Full(size) => vec![Rectangle::from_size(*size)],
             Self::Damage(regions) => regions.clone(),
             Self::Unchanged => Vec::new(),
+            // Not an answer yet: the caller does not report this to the client.
+            Self::Deferred => Vec::new(),
         };
+    }
+}
+
+/// What the very first frame of a session painted.
+///
+/// A buffer the session never wrote holds no picture at all, so it needs every
+/// pixel. That used to mean a full readback for each new buffer, and clients
+/// that rotate through a deep swapchain rotate through *new* buffers constantly:
+/// every second or third frame paid for a whole output.
+///
+/// The picture to copy out already exists in the session texture, though, and
+/// the texture is never more than one frame behind. So a new buffer only needs
+/// whatever changed since that picture was complete — which, for a session that
+/// started from a full first frame, is exactly "everything drawn since". This
+/// keeps the running damage since the last full paint exactly for that.
+struct SinceFullPaint {
+    /// The damage accumulated since the texture last held a complete picture.
+    damage: Vec<Rectangle<i32, Physical>>,
+    /// Whether a complete picture exists in the texture at all. Before the first
+    /// drawn frame there is none, and a new buffer really does need everything.
+    complete: bool,
+}
+
+impl SinceFullPaint {
+    fn new() -> Self {
+        return Self {
+            damage: Vec::new(),
+            complete: false,
+        };
+    }
+
+    /// Record what one drawn frame repainted.
+    ///
+    /// A frame the tracker reports as full damage means the texture now holds a
+    /// complete picture, which resets the backlog: nothing older than this frame
+    /// is missing from it.
+    fn drew(&mut self, painted: &[Rectangle<i32, Physical>], was_full: bool) {
+        if was_full {
+            self.damage.clear();
+            self.complete = true;
+            return;
+        }
+        if !self.complete {
+            // Part of the texture is still blank, so the backlog has to stay
+            // "everything": a partial paint cannot complete a partial picture.
+            return;
+        }
+        self.damage.extend(painted.iter().copied());
+        coalesce(&mut self.damage);
+    }
+
+    /// What a buffer that has never been written is missing.
+    ///
+    /// `None` means the texture has never held a complete picture, so the caller
+    /// has to fall back to the whole output.
+    fn backlog(&self) -> Option<Vec<Rectangle<i32, Physical>>> {
+        if !self.complete {
+            return None;
+        }
+        return Some(self.damage.clone());
     }
 }
 
@@ -218,6 +325,27 @@ pub struct SessionCapture {
     /// part of the picture that buffer is still missing. A buffer that is not in
     /// here has never been written and needs everything.
     pending: HashMap<ObjectId, Vec<Rectangle<i32, Physical>>>,
+    /// What changed since the texture last held a complete picture, used for the
+    /// buffers that have never been written.
+    since_full: SinceFullPaint,
+    /// Insertion order of `pending`, so the oldest buffer can be forgotten when
+    /// the map hits [`MAX_TRACKED_BUFFERS`].
+    order: VecDeque<ObjectId>,
+    /// A readback whose pixels are queued on the GPU but not yet mapped.
+    ///
+    /// At most one: a second `capture` cannot arrive while the first frame is
+    /// still unready, because the protocol gives a session one frame at a time.
+    deferred: Option<DeferredReadback>,
+}
+
+/// A readback waiting for its frame's fence.
+pub struct DeferredReadback {
+    /// The pixels copied out of the framebuffer, still on the GPU side.
+    readback: readback::PendingReadback,
+    /// The client's buffer, held so the pixels have somewhere to go.
+    buffer: WlBuffer,
+    /// What to report once the pixels are written.
+    outcome: CaptureOutcome,
 }
 
 impl SessionCapture {
@@ -238,7 +366,27 @@ impl SessionCapture {
             tracker: OutputDamageTracker::new(size, scale, Transform::Normal),
             texture,
             pending: HashMap::new(),
+            since_full: SinceFullPaint::new(),
+            order: VecDeque::new(),
+            deferred: None,
         });
+    }
+
+    /// Forget the least recently written buffer.
+    ///
+    /// Dropping the whole map (what this used to do) throws away what *every*
+    /// buffer is missing, so the next rotation pays a full readback per buffer.
+    /// Forgetting one at a time keeps the cost to that one buffer, and even that
+    /// buffer is not lost: [`SinceFullPaint`] still knows what a never-written
+    /// buffer needs.
+    fn forget_oldest_buffer(&mut self) {
+        while let Some(oldest) = self.order.pop_front() {
+            if self.pending.remove(&oldest).is_some() {
+                trace!("forgot the oldest capture buffer to keep the map bounded");
+                return;
+            }
+        }
+        return;
     }
 
     /// Draw the current scene and copy the result into `buffer`.
@@ -252,6 +400,14 @@ impl SessionCapture {
         let buffer_size: Size<i32, Buffer> = Size::from((self.size.w, self.size.h));
         let id = buffer.id();
         let known = self.pending.contains_key(&id);
+        // The protocol gives a session one frame at a time, so a deferred
+        // readback cannot still be pending here. Landing it now would write into
+        // a buffer the client may have reattached; report the previous frame's
+        // failure instead of guessing.
+        anyhow::ensure!(
+            self.deferred.is_none(),
+            "a capture frame arrived while the previous readback was still queued"
+        );
         if tracing::enabled!(tracing::Level::TRACE) {
             let summary: Vec<_> = elements
                 .iter()
@@ -266,22 +422,59 @@ impl SessionCapture {
         // (see the module docs), so no older damage may be replayed. A fresh
         // tracker has no history at all and reports a full first frame, which is
         // what repaints the blank texture.
-        let fresh = {
+        // Whether this frame had to repaint the whole output, known *before*
+        // drawing: the tracker has no history on its first frame and reports the
+        // full output then. Afterwards, `damage: None` means "nothing changed,
+        // nothing was drawn", which is a completely different thing from "the
+        // whole output was drawn" — both would look like an empty list.
+        let traces_everything = !self.since_full.complete;
+        let (fresh, drawn) = {
             let result =
                 self.tracker
                     .render_output(renderer, &mut target, 1, elements, background)?;
-            result
-                .damage
-                .map(|damage| return damage.to_vec())
-                .unwrap_or_default()
+            // The frame's own fence. It signals when the drawing that produced
+            // the picture below has landed on the GPU, which is what a readback
+            // has to wait for — and waiting for it here would stall the event
+            // loop for the duration of the frame.
+            let sync = result.sync.clone();
+            let fresh = match result.damage {
+                // Nothing to draw: the texture already holds the current picture.
+                None => {
+                    if traces_everything {
+                        // A blank texture the tracker considers current cannot
+                        // happen on its first frame, but report everything rather
+                        // than trust a picture that was never painted.
+                        vec![Rectangle::from_size(self.size)]
+                    } else {
+                        Vec::new()
+                    }
+                }
+                Some(damage) => damage.to_vec(),
+            };
+            (fresh, sync)
         };
+        self.since_full.drew(&fresh, traces_everything);
 
         // What this buffer is missing: its own backlog plus this frame's changes.
+        // A buffer that was never written starts from what the texture has
+        // changed since it last held a complete picture, not from nothing.
+        //
+        // `since_full` was just updated with this frame, so for a new buffer it
+        // already covers the frame; adding `fresh` again would be redundant work
+        // in `coalesce`, not a correctness problem, but it is skipped anyway.
         let mut needed = match self.pending.get(&id) {
-            Some(pending) => pending.clone(),
-            None => Vec::new(),
+            Some(pending) => {
+                let mut needed = pending.clone();
+                needed.extend(fresh.iter().copied());
+                needed
+            }
+            None => self
+                .since_full
+                .backlog()
+                // No complete picture exists yet, so the whole output is stale.
+                .unwrap_or_else(|| return vec![Rectangle::from_size(self.size)]),
         };
-        needed.extend(fresh.iter().copied());
+        coalesce(&mut needed);
         if known && needed.is_empty() {
             // Nothing was drawn and the buffer already holds the picture: no
             // readback, no copy. `Ready` without damage says exactly that.
@@ -289,12 +482,10 @@ impl SessionCapture {
             return Ok(CaptureOutcome::Unchanged);
         }
 
-        let plan = if known {
-            plan_readback(&needed, self.size)
-        } else {
-            // Never written: every pixel of it is stale.
-            ReadbackPlan::Full
-        };
+        // One plan for both cases: `needed` is already "everything" for a buffer
+        // the session knows nothing about, so `plan_readback` decides whether
+        // that is cheaper as regions or as one full read.
+        let plan = plan_readback(&needed, self.size);
         trace!(
             ?id,
             known,
@@ -314,26 +505,65 @@ impl SessionCapture {
             ReadbackPlan::Full => vec![Rectangle::from_size(buffer_size)],
             ReadbackPlan::Regions(regions) => regions.clone(),
         };
+        // A session always captures into `Xrgb8888` shm; the cursor session is
+        // the only `Argb8888` capture and it does not go through here.
+        let shm_format = smithay::reexports::wayland_server::protocol::wl_shm::Format::Xrgb8888;
         // A session always copies the whole output into a buffer of the same
         // size, so the framebuffer, the buffer and the source origin coincide.
-        copy_into_shm(
-            buffer,
-            buffer_size,
-            buffer_size,
+        //
+        // The copy is queued on the GPU and only *tried* here: mapping it waits
+        // for the drawing to land, which is the whole cost of a capture. If the
+        // GPU is not done, the regions are handed back with the frame and the
+        // caller retries on a later iteration.
+        let copied = readback::copy_regions(
             renderer,
             &target,
             Point::from((0, 0)),
             &regions,
+            buffer_size,
             Fourcc::Xrgb8888,
         )?;
+        let pending_readback = readback::PendingReadback {
+            regions: copied,
+            // The drawing just above produced the picture this readback copies,
+            // so its fence is what the mapping has to wait for.
+            sync: drawn,
+        };
+        // The framebuffer borrow ends here; the bookkeeping below mutates the
+        // session itself.
+        drop(target);
+
+        // Try to land the readback right away. A small capture, or one whose
+        // frame the GPU finished while the event loop was busy, maps without
+        // waiting; a large one is handed back so the caller can retry once the
+        // fence signals instead of blocking this iteration.
+        if pending_readback.is_ready() {
+            readback::write_regions(renderer, pending_readback, buffer, buffer_size, shm_format)?;
+        } else {
+            trace!(
+                ?id,
+                "capture readback deferred until the frame's fence signals"
+            );
+            self.deferred = Some(DeferredReadback {
+                readback: pending_readback,
+                buffer: buffer.clone(),
+                outcome: match &plan {
+                    ReadbackPlan::Full => CaptureOutcome::Full(buffer_size),
+                    ReadbackPlan::Regions(regions) => CaptureOutcome::Damage(regions.clone()),
+                },
+            });
+            return Ok(CaptureOutcome::Deferred);
+        }
 
         // The new backlog: every other buffer is now missing this frame's
         // changes, and this one is missing nothing.
-        if !known && self.pending.len() >= MAX_TRACKED_BUFFERS {
-            // Forget everything: the buffers written next get a full readback,
-            // which is correct, just slower. Without this a client that keeps
-            // allocating buffers would grow the map without bound.
-            self.pending.clear();
+        if !known {
+            // A fresh buffer joins the rotation; the map has to stay bounded for
+            // a client that keeps allocating, but forgetting a *single* buffer
+            // keeps the cost to that buffer instead of to all of them.
+            while self.pending.len() >= MAX_TRACKED_BUFFERS {
+                self.forget_oldest_buffer();
+            }
         }
         for (other, pending) in self.pending.iter_mut() {
             if *other == id {
@@ -342,12 +572,41 @@ impl SessionCapture {
             pending.extend(fresh.iter().copied());
             coalesce(pending);
         }
-        self.pending.insert(id, Vec::new());
+        self.pending.insert(id.clone(), Vec::new());
+        // Track insertion order, so the oldest buffer is the one forgotten.
+        self.order.retain(|other| return *other != id);
+        self.order.push_back(id);
 
         return Ok(match plan {
             ReadbackPlan::Full => CaptureOutcome::Full(buffer_size),
             ReadbackPlan::Regions(regions) => CaptureOutcome::Damage(regions),
         });
+    }
+
+    /// Land a readback that was deferred because its fence had not signaled.
+    ///
+    /// Returns the outcome once the pixels are in the client's buffer, or `None`
+    /// while the GPU is still busy (the caller retries next iteration).
+    pub fn finish_deferred(
+        &mut self,
+        renderer: &mut GlesRenderer,
+    ) -> anyhow::Result<Option<CaptureOutcome>> {
+        let Some(deferred) = self.deferred.as_ref() else {
+            return Ok(None);
+        };
+        if !deferred.readback.is_ready() {
+            return Ok(None);
+        }
+        let deferred = self.deferred.take().expect("checked just above");
+        let buffer_size: Size<i32, Buffer> = Size::from((self.size.w, self.size.h));
+        readback::write_regions(
+            renderer,
+            deferred.readback,
+            &deferred.buffer,
+            buffer_size,
+            smithay::reexports::wayland_server::protocol::wl_shm::Format::Xrgb8888,
+        )?;
+        return Ok(Some(deferred.outcome));
     }
 }
 
@@ -815,5 +1074,73 @@ mod tests {
         let mut small = vec![rect(1, 2, 3, 4)];
         coalesce(&mut small);
         assert_eq!(small, vec![rect(1, 2, 3, 4)]);
+    }
+
+    #[test]
+    fn the_first_frame_of_a_session_cannot_reuse_the_texture() {
+        // Before anything was drawn there is no picture, so a new buffer needs
+        // the whole output rather than "nothing changed since the last paint".
+        let since = SinceFullPaint::new();
+        assert_eq!(since.backlog(), None);
+    }
+
+    #[test]
+    fn a_full_paint_makes_the_texture_complete() {
+        let mut since = SinceFullPaint::new();
+        since.drew(&[rect(0, 0, 10, 10)], true);
+        assert!(since.complete);
+        // The backlog of a never-written buffer is "nothing changed since the
+        // full paint", not "everything".
+        assert_eq!(since.backlog(), Some(Vec::new()));
+    }
+
+    #[test]
+    fn later_damage_becomes_the_backlog_of_a_new_buffer() {
+        let mut since = SinceFullPaint::new();
+        since.drew(&[rect(0, 0, 10, 10)], true);
+        since.drew(&[rect(20, 20, 5, 5)], false);
+        // A buffer the session never wrote is missing exactly what changed after
+        // the last complete picture. This is what keeps a rotating client from
+        // paying a full output readback every second or third frame.
+        assert_eq!(since.backlog(), Some(vec![rect(20, 20, 5, 5)]));
+    }
+
+    #[test]
+    fn a_second_full_paint_clears_the_backlog() {
+        let mut since = SinceFullPaint::new();
+        since.drew(&[], true);
+        since.drew(&[rect(1, 1, 2, 2)], false);
+        since.drew(&[rect(0, 0, 100, 100)], true);
+        assert!(since.complete);
+        assert_eq!(since.backlog(), Some(Vec::new()));
+    }
+
+    #[test]
+    fn a_partial_paint_cannot_complete_a_partial_texture() {
+        // The tracker's very first frame must be full damage; if a partial one
+        // ever arrives, the texture is still partly blank and the backlog has to
+        // stay "everything" rather than claim a complete picture.
+        let mut since = SinceFullPaint::new();
+        since.drew(&[rect(0, 0, 10, 10)], false);
+        assert!(!since.complete);
+        assert_eq!(since.backlog(), None);
+    }
+
+    #[test]
+    fn a_buffer_the_session_never_wrote_is_still_missing_what_changed() {
+        // End-to-end shape of the fix: a rotating client alternates buffers, and
+        // the second buffer of the rotation must not read back the whole output
+        // when only a small rectangle changed.
+        let size = size(1000, 1000);
+        let mut since = SinceFullPaint::new();
+        since.drew(&[Rectangle::from_size(size)], true);
+        since.drew(&[rect(10, 10, 20, 20)], false);
+        let needed = since
+            .backlog()
+            .unwrap_or_else(|| return vec![Rectangle::from_size(size)]);
+        assert_eq!(
+            plan_readback(&needed, size),
+            ReadbackPlan::Regions(vec![buffer_rect(10, 10, 20, 20)])
+        );
     }
 }
