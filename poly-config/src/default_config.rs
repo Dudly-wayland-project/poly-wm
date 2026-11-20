@@ -75,12 +75,6 @@ config({
     throttle_resize: true,       // one size request per client acknowledgement
   },
 
-  overview: {
-    zoom: 0.5,
-    backdrop_color: "#262626",
-    card_color: "#404040",
-  },
-
   // Problems always appear as on-screen Toasts; set this to also send them to
   // the desktop notification daemon (needs a build with the `dbus` feature).
   errors: { dbus: false },
@@ -132,7 +126,6 @@ bind("Mod+Page_Down", "focus-workspace-down");
 bind("Mod+1", { focus_workspace: 1 });
 bind("Mod+2", { focus_workspace: 2 });
 bind("Mod+3", { focus_workspace: 3 });
-bind("Mod+O", "toggle-overview");
 bind("Mod+R", "reload-config");
 // Mouse bindings move and resize windows.
 bind("Mod+MouseLeft", "move-window");

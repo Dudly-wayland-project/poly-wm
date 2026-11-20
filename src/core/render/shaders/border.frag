@@ -19,7 +19,7 @@ uniform vec4 border_color;
 uniform float border_width;
 uniform vec4 corner_radius;
 // The workspace card in window geometry space; discard the border outside it
-// so a floating window cannot draw a stray line over the overview gap.
+// so a floating window cannot draw a stray line over the neighbouring workspace.
 uniform vec4 poly_card_clip;
 
 float poly_rounding_alpha(vec2 coords, vec2 size, vec4 corner_radius);

@@ -331,7 +331,6 @@ Actions without fields are JSON strings:
 "MoveWindowToWorkspaceDown"
 "MoveWorkspaceUp"
 "MoveWorkspaceDown"
-"ToggleOverview"
 ```
 
 Actions with fields:
@@ -357,7 +356,7 @@ configuration loader already checks their names against the layout.
 A complete action request wraps the action in the `Action` variant:
 
 ```json
-{"Action":"ToggleOverview"}
+{"Action":"CloseWindow"}
 {"Action":{"FocusWorkspace":{"index":2}}}
 ```
 
@@ -388,8 +387,7 @@ The stream begins with a full snapshot in this exact order:
 1. `WorkspacesChanged`
 2. `WindowsChanged`
 3. `OutputsChanged`
-4. `OverviewOpenedOrClosed`
-5. `ConfigLoaded`
+4. `ConfigLoaded`
 
 It then sends incremental events as the compositor state changes. The sequence
 looks like this (payloads abbreviated):
@@ -399,14 +397,13 @@ looks like this (payloads abbreviated):
 {"WorkspacesChanged":{"workspaces":[...]}}
 {"WindowsChanged":{"windows":[...]}}
 {"OutputsChanged":{"outputs":[...]}}
-{"OverviewOpenedOrClosed":{"is_open":false}}
 {"ConfigLoaded":{"failed":false}}
 {"WindowOpenedOrChanged":{"window":{...}}}
 {"WindowFocusChanged":{"id":3}}
 ```
 
-The five snapshot events are always sent, including when their arrays are empty
-or the overview is closed. Reconnecting is the intended way to resynchronize
+The four snapshot events are always sent, including when their arrays are
+empty. Reconnecting is the intended way to resynchronize
 after a client has missed events.
 
 ### Event variants
@@ -426,7 +423,6 @@ after a client has missed events.
 | `OutputAdded` | `{"output":Output}` | An output appeared. |
 | `OutputRemoved` | `{"name":"eDP-1"}` | An output disappeared. |
 | `OutputChanged` | `{"output":Output}` | The output's mode, scale, position or other reported properties changed. |
-| `OverviewOpenedOrClosed` | `{"is_open":true}` | The workspace overview opened or closed. |
 | `ConfigLoaded` | `{"failed":false}` | A configuration load finished. `true` means the file had errors: on reload the previous configuration stays active, and at startup the built-in defaults remain in use. |
 
 `WindowOpenedOrChanged` excludes the focus flag. A focus change is a separate
@@ -466,7 +462,6 @@ poly msg focused-output
 poly msg xwayland
 
 poly msg action close-window
-poly msg action toggle-overview
 poly msg action -- spawn foot -e top
 poly msg action focus-workspace 2
 poly msg action move-window-to-workspace 3
@@ -507,7 +502,7 @@ $ poly msg --json version
 $ poly msg --json windows
 []
 
-$ poly msg --json action toggle-overview
+$ poly msg --json action close-window
 null
 ```
 

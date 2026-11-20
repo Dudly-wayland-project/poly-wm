@@ -12,8 +12,8 @@
 //! With `general.blur.xray` the backdrop is shared instead: [`XrayBuffer`]
 //! keeps one blurred copy of the wallpaper per output and every blur element
 //! samples it. [`XrayCaptureElement`] *is* the wallpaper in the draw order: it
-//! repaints the background (Bottom/Background layers and the overview backdrop)
-//! and then captures it, so the copy never contains windows and only a
+//! repaints the background (the Bottom/Background layers) and then captures
+//! it, so the copy never contains windows and only a
 //! wallpaper change makes it run the blur again.
 
 use std::cell::{Cell, RefCell};
@@ -536,16 +536,21 @@ impl BlurElement {
         let sy = f64::from(dst.size.h) / self.geometry.size.h.max(1.0);
         let mut clipped = Vec::with_capacity(damage.len());
         for region in regions.iter() {
-            let physical = Rectangle::new(
-                Point::from((
-                    (f64::from(region.loc.x) * sx).round() as i32,
-                    (f64::from(region.loc.y) * sy).round() as i32,
-                )),
-                Size::from((
-                    (f64::from(region.size.w) * sx).round() as i32,
-                    (f64::from(region.size.h) * sy).round() as i32,
-                )),
-            );
+            // Round the extremities, not location and size: strips that touch
+            // in logical space then still touch in physical space, with no
+            // seam and no doubly painted row at fractional scales.
+            let a = Point::<i32, Physical>::from((
+                (f64::from(region.loc.x) * sx).round() as i32,
+                (f64::from(region.loc.y) * sy).round() as i32,
+            ));
+            let b = Point::<i32, Physical>::from((
+                (f64::from(region.loc.x + region.size.w) * sx).round() as i32,
+                (f64::from(region.loc.y + region.size.h) * sy).round() as i32,
+            ));
+            if b.x <= a.x || b.y <= a.y {
+                continue;
+            }
+            let physical = Rectangle::from_extremities(a, b);
             clipped.extend(
                 damage
                     .iter()
@@ -848,17 +853,6 @@ impl RenderElement<GlesRenderer> for BlurElement {
     }
 }
 
-/// The overview state that changes what an xray capture contains.
-#[derive(Debug, Clone, PartialEq)]
-pub struct XrayOverview {
-    /// Overview progress; the backdrop fades in with it.
-    pub progress: f64,
-    /// Content scale of the cards.
-    pub zoom: f64,
-    /// The drawn card rectangles, by workspace index.
-    pub cards: Vec<(usize, Rectangle<i32, Logical>)>,
-}
-
 /// Everything that determines the content of one xray capture.
 ///
 /// The damage tracker only reports *that* an element changed, not what it
@@ -888,8 +882,6 @@ pub struct XrayState {
     pub time_bits: u64,
     /// Bottom/Background layers in draw order: protocol id, commit, geometry.
     pub layers: Vec<(u32, CommitCounter, Rectangle<i32, Logical>)>,
-    /// The overview, when it is open.
-    pub overview: Option<XrayOverview>,
 }
 
 /// One blurred copy of the wallpaper, shared by every blur element of an output.
@@ -1014,8 +1006,7 @@ impl XrayBuffer {
 /// The element that owns the background and captures the shared xray backdrop.
 ///
 /// It is the backmost element of the frame and holds the elements that paint the
-/// wallpaper — the Bottom/Background layers, and in the overview the cards and
-/// the backdrop. Instead of blitting whatever the framebuffer happens to
+/// wallpaper: the Bottom/Background layers. Instead of blitting whatever the framebuffer happens to
 /// contain, it repaints them itself: an opaque window may have covered this area
 /// in an earlier frame and the damage tracker then never repainted the wallpaper
 /// below it, so a plain blit would capture window pixels.
@@ -1182,7 +1173,6 @@ mod tests {
             transform: Transform::Normal,
             time_bits: 0,
             layers: Vec::new(),
-            overview: None,
         };
     }
 

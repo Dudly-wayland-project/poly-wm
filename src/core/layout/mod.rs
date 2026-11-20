@@ -95,6 +95,14 @@ pub struct ManagedWindow {
     /// grab only produces rectangles; the state lives here, like niri's
     /// `InteractiveResize`).
     resize: Option<InteractiveResize>,
+    /// Whether the next frame boundary must send this window a frame callback
+    /// regardless of throttling or visibility.
+    ///
+    /// Set after every configure (niri's `needs_frame_callback`): a client
+    /// that renders on frame callbacks would otherwise wait for the next
+    /// throttled callback before it can draw the new size, which is the
+    /// half-frame lag of a GTK window while it is resized.
+    needs_frame_callback: bool,
     /// Resolved visual settings: radius, opacity, border, shadow, blur and the
     /// window shader.
     pub visuals: crate::core::render::visual::WindowVisuals,
@@ -131,8 +139,12 @@ struct InteractiveResize {
     origin: Point<i32, Logical>,
     /// The size the pointer asks for.
     desired: Size<i32, Logical>,
-    /// The size the client drew last.
+    /// The size the client acknowledged last (what the throttle compares).
     committed: Size<i32, Logical>,
+    /// The window geometry of the client's last commit (what is drawn). It
+    /// differs from `committed` when the client clamps the size it was asked
+    /// for; drawing `committed` would then stretch the buffer.
+    drawn: Size<i32, Logical>,
     /// The size in the last configure this resize sent.
     sent: Option<Size<i32, Logical>>,
     /// The grab ended; the final configure is on its way and `Resizing` is
@@ -197,6 +209,12 @@ fn committed_size(window: &Window) -> Size<i32, Logical> {
     return Size::from((size.w.max(1), size.h.max(1)));
 }
 
+/// The window geometry the client committed last, at least one pixel per axis.
+fn drawn_size(window: &Window) -> Size<i32, Logical> {
+    let size = window.geometry().size;
+    return Size::from((size.w.max(1), size.h.max(1)));
+}
+
 /// Ask the client for `size`; `resizing` also sets or clears the protocol state
 /// that tells it the compositor is dragging an edge.
 fn send_resize_configure(managed: &mut ManagedWindow, size: Size<i32, Logical>, resizing: bool) {
@@ -211,7 +229,9 @@ fn send_resize_configure(managed: &mut ManagedWindow, size: Size<i32, Logical>, 
             pending.states.unset(ToplevelState::Resizing);
         }
     });
-    toplevel.send_pending_configure();
+    if toplevel.send_pending_configure().is_some() {
+        managed.needs_frame_callback = true;
+    }
 }
 
 /// The niri-style opening animation: fade in while scaling up from 50%.
@@ -495,85 +515,10 @@ impl OutputLayout {
     }
 }
 
-/// An eased transition from one value to another.
-#[derive(Debug, Clone, Copy)]
-struct Fade {
-    from: f64,
-    to: f64,
-    started: Instant,
-    spec: AnimationSpec,
-}
-
-impl Fade {
-    fn value(&self, now: Instant) -> f64 {
-        let progress = self
-            .spec
-            .progress(now.saturating_duration_since(self.started));
-        return self.from + (self.to - self.from) * progress;
-    }
-
-    fn running(&self, now: Instant) -> bool {
-        return self
-            .spec
-            .running(now.saturating_duration_since(self.started));
-    }
-}
-
-/// The workspace overview: a zoomed-out view of every workspace of an output.
-///
-/// The state is global (one switch for the whole session), while the geometry
-/// is per output: each output shows its own vertical stack.
-#[derive(Debug, Default)]
-struct Overview {
-    /// Whether the overview should stay open once the animation ends.
-    open: bool,
-    transition: Option<Fade>,
-}
-
-impl Overview {
-    /// The eased zoomed-out factor: 0 is the normal output, 1 the overview.
-    ///
-    /// While closing, `open` is already false but the progress still has to
-    /// count down, so the value keeps driving the geometry.
-    fn progress(&self, now: Instant) -> f64 {
-        let Some(transition) = &self.transition else {
-            return if self.open { 1.0 } else { 0.0 };
-        };
-        return transition.value(now).clamp(0.0, 1.0);
-    }
-
-    /// Whether input has to be routed to the overview instead of clients.
-    fn active(&self, now: Instant) -> bool {
-        return self.open || self.progress(now) > 0.0;
-    }
-
-    fn running(&self, now: Instant) -> bool {
-        return self
-            .transition
-            .as_ref()
-            .is_some_and(|transition| return transition.running(now));
-    }
-
-    fn finish(&mut self, now: Instant) -> bool {
-        if !self.running(now) && self.transition.is_some() {
-            self.transition = None;
-            return true;
-        }
-        return false;
-    }
-}
-
-/// One workspace card, in compositor coordinates and already scaled.
+/// One workspace card: where a workspace sits on screen, in compositor
+/// coordinates. Only a workspace slide moves the cards off the output.
 #[derive(Debug, Clone, Copy)]
 pub struct WorkspaceCard {
-    /// Index in the output's workspace stack.
-    pub index: usize,
-    /// Whether this is the active workspace.
-    ///
-    /// Every card has the same color in niri, so the renderer does not need it;
-    /// it stays part of the geometry for hit tests and diagnostics.
-    #[allow(dead_code)]
-    pub active: bool,
     /// The card rectangle drawn on screen.
     pub rect: Rectangle<i32, Logical>,
 }
@@ -581,10 +526,6 @@ pub struct WorkspaceCard {
 /// Geometry of an output's workspace stack at one instant.
 #[derive(Debug, Clone)]
 pub struct WorkspaceView {
-    /// Overview progress: 0 is the plain output, 1 the full overview.
-    pub overview: f64,
-    /// Content scale of every card (1 when the overview is closed).
-    pub zoom: f64,
     /// The output origin, in compositor coordinates.
     pub origin: Point<i32, Logical>,
     /// Cards, ordered by workspace index.
@@ -594,31 +535,16 @@ pub struct WorkspaceView {
 impl WorkspaceView {
     /// Where a workspace-local rectangle is drawn on screen.
     ///
-    /// At the normal zoom this is exactly `local` (the card sits on the
-    /// output), so nothing has to special-case the plain view.
+    /// For the active workspace outside a slide this is exactly `local`
+    /// (the card sits on the output); a sliding card only translates it.
     pub fn project(
         &self,
         workspace: usize,
         local: Rectangle<i32, Logical>,
     ) -> Option<Rectangle<i32, Logical>> {
         let card = self.cards.get(workspace)?;
-        let x = f64::from(card.rect.loc.x) + f64::from(local.loc.x - self.origin.x) * self.zoom;
-        let y = f64::from(card.rect.loc.y) + f64::from(local.loc.y - self.origin.y) * self.zoom;
-        let w = (f64::from(local.size.w) * self.zoom).max(1.0);
-        let h = (f64::from(local.size.h) * self.zoom).max(1.0);
-        return Some(Rectangle::new(
-            Point::from((x.round() as i32, y.round() as i32)),
-            Size::from((w.round() as i32, h.round() as i32)),
-        ));
-    }
-
-    /// The card containing a compositor-space point.
-    pub fn card_at(&self, location: Point<f64, Logical>) -> Option<WorkspaceCard> {
-        return self
-            .cards
-            .iter()
-            .find(|card| return card.rect.to_f64().contains(location))
-            .copied();
+        let offset = card.rect.loc - self.origin;
+        return Some(Rectangle::new(local.loc + offset, local.size));
     }
 }
 
@@ -628,7 +554,7 @@ pub struct PlacedWindow<'a> {
     pub managed: &'a ManagedWindow,
     /// Where it is drawn, in compositor coordinates.
     pub rect: Rectangle<i32, Logical>,
-    /// The overview/workspace-switch card this window belongs to, in
+    /// The workspace-switch card this window belongs to, in
     /// compositor coordinates. Windows are clipped to it so a floating window
     /// cannot paint over a neighbouring card.
     pub card: Rectangle<i32, Logical>,
@@ -736,10 +662,6 @@ pub struct LayoutManager {
     animations_running: bool,
     dirty_space: bool,
     warned: HashSet<String>,
-    /// Workspace overview state.
-    overview: Overview,
-    /// Card scale at full overview, from `overview.zoom`.
-    overview_zoom: f64,
     /// Windows that were destroyed but are still fading out as baked
     /// snapshots.
     closing: Vec<ClosingWindow>,
@@ -778,8 +700,6 @@ impl LayoutManager {
             animations_running: false,
             dirty_space: false,
             warned: HashSet::new(),
-            overview: Overview::default(),
-            overview_zoom: config.overview.zoom.clamp(0.0001, 0.75),
             closing: Vec::new(),
             pending_unmap_closing: HashMap::new(),
         };
@@ -798,7 +718,6 @@ impl LayoutManager {
             .clone()
             .unwrap_or_else(|| "columns".to_owned());
         self.animations = config.general.animations;
-        self.overview_zoom = config.overview.zoom.clamp(0.0001, 0.75);
         self.warned.clear();
         // Visual settings come from `general` plus the first matching rule, so
         // a reload has to re-resolve them for every window: the client is not
@@ -841,6 +760,20 @@ impl LayoutManager {
     pub fn by_window(&self, window: &Window) -> Option<&ManagedWindow> {
         let surface = window.wl_surface()?;
         return self.by_root(&root_surface(&surface));
+    }
+
+    /// Consume the forced frame callback request of `window`, if it has one.
+    pub fn take_frame_callback_request(&mut self, window: &Window) -> bool {
+        let Some(surface) = window.wl_surface() else {
+            return false;
+        };
+        let Some(id) = self.roots.get(&root_surface(&surface)).copied() else {
+            return false;
+        };
+        return self
+            .windows
+            .get_mut(&id)
+            .is_some_and(|managed| return std::mem::take(&mut managed.needs_frame_callback));
     }
 
     /// The Smithay handle of the managed window `id`.
@@ -921,8 +854,8 @@ impl LayoutManager {
 
     /// The workspace stack of `output`, projected for drawing at `now`.
     ///
-    /// With the overview closed this is the plain output: the active card sits
-    /// on the output rectangle and every other card is one screen away, so
+    /// The active card sits on the output rectangle and every other card is
+    /// one screen away (a slide moves them all), so outside a slide
     /// `WorkspaceView::project` returns exactly the layout-local rectangle.
     pub fn view(
         &self,
@@ -930,31 +863,18 @@ impl LayoutManager {
         area: Rectangle<i32, Logical>,
         now: Instant,
     ) -> WorkspaceView {
-        let overview = self.overview.progress(now);
-        let target = self.overview_zoom;
         let Some(layout) = self.outputs.get(output) else {
             return WorkspaceView {
-                overview,
-                zoom: zoom_at(overview, target),
                 origin: area.loc,
-                cards: vec![WorkspaceCard {
-                    index: 0,
-                    active: true,
-                    rect: area,
-                }],
+                cards: vec![WorkspaceCard { rect: area }],
             };
         };
         let cards = workspace_cards(
             area,
             layout.workspaces.len().max(1),
-            layout.active,
             layout.render_index(now),
-            overview,
-            target,
         );
         return WorkspaceView {
-            overview,
-            zoom: zoom_at(overview, target),
             origin: area.loc,
             cards,
         };
@@ -1117,11 +1037,6 @@ impl LayoutManager {
         return ids;
     }
 
-    /// Whether the workspace overview is open (it may still be animating).
-    pub fn overview_open(&self) -> bool {
-        return self.overview.open;
-    }
-
     /// The output that currently has keyboard focus, falling back to the
     /// pointer output and then the first output.
     pub fn active_output(state: &State) -> Option<smithay::output::Output> {
@@ -1201,6 +1116,103 @@ impl LayoutManager {
             .map(|layout| return layout.ws().layout.as_str());
     }
 
+    /// The size a not-yet-mapped tiled window will get, for its initial
+    /// configure (niri sends the slot size up front too).
+    ///
+    /// Without it the client draws its first buffer at a size of its own
+    /// choosing, maps, and only then learns its slot: the window lands at the
+    /// wrong size and the neighbours reflow one configure round-trip later.
+    /// The window is inserted the way `map_window` will insert it, the layout
+    /// is asked for its rectangle, and the insertion is undone. `None` for
+    /// floating windows, which choose their own size.
+    pub fn initial_size(state: &mut State, window: &Window) -> Option<Size<i32, Logical>> {
+        let identity = window_title_and_app_id(window);
+        let (app_id, title) = identity.as_pair();
+        let rule = match_window_rule(&state.core.config, app_id, title);
+        let floating = rule
+            .as_ref()
+            .and_then(|rule| return rule.float)
+            .unwrap_or_else(|| return opens_floating(window));
+        if floating {
+            return None;
+        }
+        let focus_on_map = rule
+            .as_ref()
+            .and_then(|rule| return rule.focus)
+            .unwrap_or(true);
+        let output = open_output(state, rule)?;
+        let outputs = state.core.space.outputs().cloned().collect::<Vec<_>>();
+        ensure_all_outputs(&mut state.core.layout, &outputs);
+        state.core.layout.ensure_output(&output);
+        let area = Self::layout_area(state, &output)?;
+        // The id `map_window` is about to hand out; nothing is allocated.
+        let id = state.core.layout.next_id;
+        if state.core.layout.windows.contains_key(&id) {
+            return None;
+        }
+        let seed = Rectangle::new(area.loc, area.size);
+        let insert_at = {
+            let (min_size, max_size) = size_constraints(window);
+            let entry = LayoutWindow {
+                id,
+                app_id: app_id.map(str::to_owned),
+                title: title.map(str::to_owned),
+                focused: false,
+                rect: to_layout_rect(seed),
+                min_size,
+                max_size,
+            };
+            Self::insert_position(state, &output, &entry)
+        };
+        let managed = ManagedWindow {
+            id,
+            window: window.clone(),
+            root: window.wl_surface()?.into_owned(),
+            output: Some(output.clone()),
+            tiled: true,
+            minimized: false,
+            fullscreen: None,
+            floating_rect: seed,
+            target_rect: seed,
+            animation: None,
+            drag_rect: None,
+            drop_preview: None,
+            open_animation: None,
+            pending: None,
+            resize: None,
+            needs_frame_callback: false,
+            visuals: crate::core::render::visual::WindowVisuals::resolve(
+                &state.core.config,
+                app_id,
+                title,
+            ),
+        };
+        state.core.layout.windows.insert(id, managed);
+        let index = state.core.layout.outputs.get_mut(&output).map(|layout| {
+            let workspace = layout.ws_mut();
+            let index = insert_at
+                .unwrap_or(workspace.tiled.len())
+                .min(workspace.tiled.len());
+            workspace.tiled.insert(index, id);
+            return index;
+        });
+        let focused = if focus_on_map {
+            Some(id)
+        } else {
+            focused_id(state)
+        };
+        let rect = Self::predict_rect(state, &output, focused, id);
+        if let (Some(layout), Some(index)) = (state.core.layout.outputs.get_mut(&output), index) {
+            let workspace = layout.ws_mut();
+            if workspace.tiled.get(index) == Some(&id) {
+                workspace.tiled.remove(index);
+            }
+        }
+        state.core.layout.windows.remove(&id);
+        let rect = clamp_to_hints(window, rect?);
+        return Some(rect.size);
+    }
+
     /// Register a window as it maps. Returns its stable id.
     pub fn map_window(state: &mut State, window: &Window, root: &WlSurface) -> u64 {
         let identity = window_title_and_app_id(window);
@@ -1274,6 +1286,7 @@ impl LayoutManager {
             open_animation,
             pending: None,
             resize: None,
+            needs_frame_callback: false,
             visuals: crate::core::render::visual::WindowVisuals::resolve(
                 &state.core.config,
                 app_id,
@@ -1539,15 +1552,7 @@ impl LayoutManager {
 
         supersede_pending(state);
         apply_desired(state, desired, now);
-        // While the overview is open the space holds the unscaled projection of
-        // the active workspace; remapping now would move the hit-test rectangles
-        // to the zoomed positions. The tick loop syncs once the overview is
-        // gone (`dirty_space` remembers that this relayout still has to land).
-        if state.core.layout.overview.active(now) {
-            state.core.layout.dirty_space = true;
-        } else {
-            sync_space(state);
-        }
+        sync_space(state);
     }
 
     /// The rectangles the active layout gives every window of one workspace.
@@ -2442,30 +2447,6 @@ impl LayoutManager {
         Self::switch_workspace(state, &output, target);
     }
 
-    /// Focus the workspace `delta` away on `output`, but never create one.
-    ///
-    /// The overview wheel uses this: scrolling down at the bottom of the stack
-    /// must stop instead of silently appending a new empty workspace. The
-    /// keyboard's `focus-workspace-down` still grows the stack.
-    pub fn focus_workspace_relative_existing(
-        state: &mut State,
-        output: &smithay::output::Output,
-        delta: isize,
-    ) {
-        let Some(layout) = state.core.layout.outputs.get(output) else {
-            return;
-        };
-        let target = layout.active as isize + delta;
-        if target < 0 {
-            return;
-        }
-        let target = target as usize;
-        if target >= layout.workspaces.len() {
-            return;
-        }
-        Self::switch_workspace(state, output, target);
-    }
-
     /// Move the focused window into another workspace and follow it.
     pub fn move_window_to_workspace(state: &mut State, index: usize) {
         if index == 0 {
@@ -2512,114 +2493,6 @@ impl LayoutManager {
         state.core.layout.dirty_space = true;
         Self::relayout(state);
         state.core.queue_redraw_all();
-    }
-
-    /// Show or hide the workspace overview (`toggle-overview`).
-    pub fn toggle_overview(state: &mut State) {
-        let now = Instant::now();
-        let open = !state.core.layout.overview.open;
-        let from = state.core.layout.overview.progress(now);
-        let to = if open { 1.0 } else { 0.0 };
-        let spec = state.core.config.general.animations.overview();
-        state.core.layout.overview.open = open;
-        state.core.layout.overview.transition = Some(Fade {
-            from,
-            to,
-            started: now,
-            spec,
-        });
-        state.core.layout.dirty_space = true;
-        state.core.queue_redraw_all();
-        // Paging uses the wheel accumulators; drop any remainder so the first
-        // scroll after the overview does not page or fire a wheel binding.
-        state.core.scroll_tracker_horizontal.reset();
-        state.core.scroll_tracker_vertical.reset();
-        ensure_animation_timer(state);
-    }
-
-    /// Whether the overview is visible, open or still closing.
-    pub fn overview_visible(&self, now: Instant) -> bool {
-        return self.overview.progress(now) > 0.0;
-    }
-
-    /// Close the overview if it is open. Returns whether it handled the input.
-    pub fn close_overview(state: &mut State) -> bool {
-        if !state.core.layout.overview.open {
-            return false;
-        }
-        Self::toggle_overview(state);
-        return true;
-    }
-
-    /// A click inside the overview: pick the workspace card under `location`
-    /// (and the window inside it) and zoom into it.
-    ///
-    /// Clicking the backdrop between or around the cards does nothing (niri
-    /// keeps the overview open there); only a card takes you somewhere.
-    pub fn overview_click(state: &mut State, location: Point<f64, Logical>) {
-        let now = Instant::now();
-        let Some(output) = state.core.output_at(location) else {
-            return;
-        };
-        let Some(area) = state.core.space.output_geometry(&output) else {
-            return;
-        };
-        let view = state.core.layout.view(&output, area, now);
-        let Some(card) = view.card_at(location) else {
-            return;
-        };
-        let same_workspace = state.core.layout.active_workspace(&output) == card.index;
-
-        // A click on a window both enters its workspace and focuses it.
-        let mut focus_target = None;
-        if let Some(layout) = state.core.layout.outputs.get(&output) {
-            if let Some(workspace) = layout.workspaces.get(card.index) {
-                let candidates = workspace
-                    .floating
-                    .iter()
-                    .rev()
-                    .chain(workspace.tiled.iter().rev());
-                for id in candidates {
-                    let Some(window) = state.core.layout.windows.get(id) else {
-                        continue;
-                    };
-                    // A minimized window is not drawn on the card, so it cannot
-                    // be what the click hit.
-                    if window.minimized {
-                        continue;
-                    }
-                    let Some(rect) = view.project(card.index, window.rect_at(now)) else {
-                        continue;
-                    };
-                    if rect.to_f64().contains(location) {
-                        focus_target = Some((window.window.clone(), window.root.clone()));
-                        break;
-                    }
-                }
-            }
-        }
-
-        Self::set_active_workspace(state, &output, card.index);
-        let focused = match focus_target {
-            Some((window, root)) => {
-                focus_window(state, &window, Some(root), SERIAL_COUNTER.next_serial());
-                true
-            }
-            // Clicking the card of the workspace that already owns the screen
-            // must not swap focus to whatever that workspace remembered: it
-            // only closes the overview.
-            None if same_workspace => true,
-            None => Self::restore_workspace_focus(state, &output),
-        };
-        if !focused {
-            Self::relayout(state);
-        }
-        state.core.queue_redraw_all();
-        // Whether or not a window was hit, the overview closes: clicking a
-        // card means "take me there".
-        if state.core.layout.overview.open {
-            Self::toggle_overview(state);
-        }
     }
 
     /// Enter workspace `index` on `output`, saving and restoring its focus.
@@ -2875,30 +2748,19 @@ impl LayoutManager {
             .outputs
             .values()
             .any(|layout| return layout.is_switching(now));
-        let overview_running = state.core.layout.overview.running(now);
         // A sliding Toast needs frames too, and it is the only animation that
         // exists without a window behind it (a broken configuration at startup).
         let toasts_sliding = state.core.toasts.animating(now);
-        let animating_now = animating || switching || overview_running || toasts_sliding;
+        let animating_now = animating || switching || toasts_sliding;
         let was_animating =
             std::mem::replace(&mut state.core.layout.animations_running, animating_now);
-        // The space holds the projection of the active view: while the
-        // overview is open the geometry is scaled, so remapping would move the
-        // hit-test rectangles away from where they settle again on close.
-        let overview = state.core.layout.overview.active(now);
-        if !overview && (animating_now || was_animating || state.core.layout.dirty_space) {
+        if animating_now || was_animating || state.core.layout.dirty_space {
             sync_space(state);
         }
         // Every output has to drop its own finished switch: `.any` would
         // short-circuit and leave the other outputs with a stale transition.
         for layout in state.core.layout.outputs.values_mut() {
             layout.finish_switch(now);
-        }
-        let overview_finished = state.core.layout.overview.finish(now);
-        if overview_finished {
-            // The `open` flag already says where the animation ends; the
-            // space can be remapped as soon as the closing animation is done.
-            state.core.layout.dirty_space = true;
         }
         if animating_now {
             // Kick the frame loop only when it is not already running. `tick`
@@ -3188,11 +3050,13 @@ impl LayoutManager {
     pub fn drag_hint_for(
         &self,
         output: &smithay::output::Output,
-    ) -> Option<(usize, Rectangle<i32, Logical>)> {
+    ) -> Option<(usize, Rectangle<i32, Logical>, &ManagedWindow)> {
         return self.windows.values().find_map(|window| {
             if window.drag_rect.is_some() && window.output.as_ref() == Some(output) {
                 let (_, workspace) = self.workspace_of(window.id)?;
-                return window.drop_preview.map(|rect| return (workspace, rect));
+                return window
+                    .drop_preview
+                    .map(|rect| return (workspace, rect, window));
             }
             return None;
         });
@@ -3246,6 +3110,7 @@ impl LayoutManager {
             origin,
             desired: rect.size,
             committed: committed_size(&managed.window),
+            drawn: drawn_size(&managed.window),
             sent: None,
             end_since: None,
         });
@@ -3389,7 +3254,7 @@ impl LayoutManager {
         // exists for clients that do not (niri: `disable_resize_throttling`).
         let throttle = state.core.config.window_drag.throttle_resize;
         let mut configure = None;
-        let mut finished = false;
+        let finished;
         {
             let Some(managed) = state.core.layout.windows.get_mut(&id) else {
                 return;
@@ -3400,6 +3265,7 @@ impl LayoutManager {
             // The client acks a configure on its next commit; that ack is the
             // only signal that the previous request landed.
             resize.committed = committed_size(&managed.window);
+            resize.drawn = drawn_size(&managed.window);
             let size = resize.size();
             let ended = resize.end_since.is_some();
             // The layout reports the requested rectangle, anchored on the
@@ -3409,22 +3275,27 @@ impl LayoutManager {
             managed.floating_rect = rect;
             managed.target_rect = rect;
             managed.animation = None;
-            if force || !throttle || resize.caught_up() {
+            // Only a new size needs a configure (the first and the last one
+            // are forced: they set and clear `Resizing`). Re-sending the same
+            // size on every commit would make the client lay out and redraw
+            // again, commit, get the same configure, and so on: it would spend
+            // every frame on that loop instead of following the pointer.
+            let changed = resize.sent != Some(size);
+            if force || (changed && (!throttle || resize.caught_up())) {
                 resize.sent = Some(size);
                 configure = Some((size, !ended));
-                // The final configure is out and the client already drew that
-                // size: nothing is left to wait for.
-                finished = ended && resize.committed == size;
             }
+            // The final configure is out and the client already drew that
+            // size: nothing is left to wait for.
+            finished = ended && resize.sent == Some(size) && resize.committed == size;
         }
         if let Some(pending) = &mut state.core.layout.pending {
             pending.targets.remove(&id);
         }
-        if let Some((size, resizing)) = configure {
-            let Some(managed) = state.core.layout.windows.get_mut(&id) else {
-                return;
-            };
-            send_resize_configure(managed, size, resizing);
+        if let Some(managed) = state.core.layout.windows.get_mut(&id) {
+            if let Some((size, resizing)) = configure {
+                send_resize_configure(managed, size, resizing);
+            }
             if finished {
                 managed.resize = None;
             }
@@ -3592,58 +3463,25 @@ fn workspace_animation(state: &State) -> AnimationSpec {
     return state.core.config.general.animations.workspace_switch();
 }
 
-/// The card scale at a given overview progress: `1.0` plain, `target` at full
-/// overview, linearly interpolated in between (niri's `compute_overview_zoom`).
-fn zoom_at(overview: f64, target: f64) -> f64 {
-    let target = target.clamp(0.0001, 0.75);
-    return (1.0 - overview * (1.0 - target)).max(0.0001);
-}
-
 /// Lay out the workspace cards at one instant.
 ///
-/// This is niri's `workspaces_render_geo`: every card is the output scaled by
-/// `zoom`, centred horizontally, and the stack is anchored so that the active
-/// card sits in the middle of the output. Consecutive cards are separated by
-/// 10% of the output height (scaled by `zoom`), so the neighbouring workspaces
-/// peek in from above and below.
-///
-/// At `overview == 0` the gap vanishes and the card height equals the output
-/// height, which reduces the formula to `(i - render_index)` screens: the
-/// active workspace is exactly the output rectangle and a slide shows two full
-/// screens moving past each other.
+/// Every card is the output rectangle, stacked vertically and anchored so
+/// that `render_index` (the active workspace, fractional during a slide)
+/// sits on the output: a slide shows two full screens moving past each other.
 fn workspace_cards(
     area: Rectangle<i32, Logical>,
     count: usize,
-    active: usize,
     render_index: f64,
-    overview: f64,
-    target_zoom: f64,
 ) -> Vec<WorkspaceCard> {
     let count = count.max(1);
-    let width = f64::from(area.size.w);
     let height = f64::from(area.size.h);
-    let zoom = zoom_at(overview, target_zoom);
-    let card_w = width * zoom;
-    let card_h = height * zoom;
-    // The gap only exists while the overview is open: with it closed a slide
-    // has to move exactly one output height, or the desktop would flash
-    // between two workspaces.
-    let gap = height * 0.1 * zoom * overview;
-    let step = card_h + gap;
-    let left = (width - card_w) / 2.0;
-    let first_top = (height - card_h) / 2.0 - render_index * step;
     let mut cards = Vec::with_capacity(count);
     for index in 0..count {
-        let top = first_top + index as f64 * step;
+        let top = (index as f64 - render_index) * height;
         cards.push(WorkspaceCard {
-            index,
-            active: index == active,
             rect: Rectangle::new(
-                Point::from((
-                    area.loc.x + left.round() as i32,
-                    area.loc.y + top.round() as i32,
-                )),
-                Size::from((card_w.round() as i32, card_h.round() as i32)),
+                Point::from((area.loc.x, area.loc.y + top.round() as i32)),
+                area.size,
             ),
         });
     }
@@ -3986,7 +3824,7 @@ impl ManagedWindow {
         // client only ever sees the sizes the compositor asked for, so it
         // catches up within a frame or two.
         if let Some(resize) = &self.resize {
-            return resize.rect_for(resize.committed);
+            return resize.rect_for(resize.drawn);
         }
         let Some(animation) = &self.animation else {
             return self.target_rect;
@@ -4200,7 +4038,11 @@ fn send_configure(
             pending.states.unset(ToplevelState::Activated);
         }
     });
-    return toplevel.send_pending_configure();
+    let serial = toplevel.send_pending_configure();
+    if serial.is_some() {
+        managed.needs_frame_callback = true;
+    }
+    return serial;
 }
 
 fn set_fullscreen_mode(state: &mut State, id: u64, mode: Option<FullscreenMode>) {
@@ -4683,102 +4525,27 @@ mod tests {
 
     #[test]
     fn plain_view_projects_the_active_workspace_unchanged() {
-        // With the overview closed every non-active card sits exactly one
-        // output away, so projecting the active workspace is the identity and
-        // the others are off screen.
+        // Every non-active card sits exactly one output away, so projecting
+        // the active workspace is the identity and the others are off screen.
         let output = area(0, 0, 1000, 600);
-        let cards = workspace_cards(output, 3, 1, 1.0, 0.0, 0.5);
         let view = WorkspaceView {
-            overview: 0.0,
-            zoom: 1.0,
             origin: output.loc,
-            cards,
+            cards: workspace_cards(output, 3, 1.0),
         };
         let local = area(40, 50, 300, 200);
         assert_eq!(view.project(1, local), Some(local));
         assert_eq!(view.project(0, local), Some(area(40, -550, 300, 200)));
         assert_eq!(view.project(2, local), Some(area(40, 650, 300, 200)));
-        assert!(view.cards[1].active);
-    }
-
-    #[test]
-    fn overview_centres_the_active_card_and_peeks_at_its_neighbours() {
-        // niri's geometry: every card is `zoom × output`, the active one sits
-        // in the middle and the neighbours keep a 10% · zoom gap, so their
-        // edges show above and below.
-        let output = area(0, 0, 1000, 600);
-        let cards = workspace_cards(output, 3, 1, 1.0, 1.0, 0.5);
-        assert_eq!(cards.len(), 3);
-        for pair in cards.windows(2) {
-            assert!(pair[0].rect.loc.y < pair[1].rect.loc.y);
-            assert_eq!(pair[0].rect.size, pair[1].rect.size);
-        }
-        // Cards are 500 × 300 and the gap is 0.1 · 600 · 0.5 = 30.
-        assert_eq!(cards[0].rect.size, Size::from((500, 300)));
-        let gap = cards[1].rect.loc.y - (cards[0].rect.loc.y + cards[0].rect.size.h);
-        assert_eq!(gap, 30);
-        // The active card is horizontally and vertically centred.
-        assert_eq!(cards[1].rect.loc, Point::from((250, 150)));
-        assert!(cards[1].active);
-        assert!(!cards[0].active);
-        // The neighbours peek into the output by 90px each.
-        assert_eq!(cards[0].rect.loc.y + cards[0].rect.size.h, 120);
-        assert_eq!(cards[2].rect.loc.y, 480);
-    }
-
-    #[test]
-    fn overview_zoom_interpolates_between_plain_and_the_configured_scale() {
-        let near = |a: f64, b: f64| return (a - b).abs() < 1e-9;
-        // The configured scale is the ceiling, exactly like niri's clamp.
-        assert!(near(zoom_at(1.0, 0.9), 0.75));
-        assert!(near(zoom_at(0.0, 0.5), 1.0));
-        assert!(near(zoom_at(1.0, 0.5), 0.5));
-        assert!(near(zoom_at(0.5, 0.5), 0.75));
-        // A degenerate target can never push the cards to zero size.
-        assert!(near(zoom_at(1.0, 0.0), 0.0001));
-    }
-
-    #[test]
-    fn overview_gap_only_exists_while_it_is_open() {
-        // Closing the overview must not leave a gap: a workspace slide then
-        // moves exactly one output height.
-        let output = area(0, 0, 1000, 600);
-        let closed = workspace_cards(output, 3, 1, 0.0, 0.0, 0.5);
-        assert_eq!(
-            closed[1].rect.loc.y - (closed[0].rect.loc.y + closed[0].rect.size.h),
-            0
-        );
-        assert_eq!(closed[0].rect.size, Size::from((1000, 600)));
-        let open = workspace_cards(output, 3, 1, 1.0, 1.0, 0.5);
-        assert_eq!(
-            open[1].rect.loc.y - (open[0].rect.loc.y + open[0].rect.size.h),
-            30
-        );
-    }
-
-    #[test]
-    fn projection_scales_around_the_card() {
-        let output = area(100, 0, 1000, 600);
-        let cards = workspace_cards(output, 2, 0, 0.0, 1.0, 0.5);
-        let view = WorkspaceView {
-            overview: 1.0,
-            zoom: 0.5,
-            origin: output.loc,
-            cards,
-        };
-        let local = area(200, 100, 400, 200);
-        let projected = view.project(0, local).unwrap();
-        let card = view.cards[0].rect;
-        assert_eq!(
-            projected.loc,
-            Point::from((
-                card.loc.x + (local.loc.x - output.loc.x) / 2,
-                card.loc.y + (local.loc.y - output.loc.y) / 2,
-            ))
-        );
-        assert_eq!(projected.size, Size::from((200, 100)));
         // A workspace without a card cannot be projected.
         assert_eq!(view.project(9, local), None);
+    }
+
+    #[test]
+    fn a_slide_moves_whole_screens_without_a_gap() {
+        let output = area(100, 0, 1000, 600);
+        let cards = workspace_cards(output, 2, 0.5);
+        assert_eq!(cards[0].rect, area(100, -300, 1000, 600));
+        assert_eq!(cards[1].rect, area(100, 300, 1000, 600));
     }
 
     fn resize(anchor: ResizeAnchor, origin: (i32, i32)) -> InteractiveResize {
@@ -4787,6 +4554,7 @@ mod tests {
             origin: Point::from(origin),
             desired: Size::from((200, 100)),
             committed: Size::from((150, 80)),
+            drawn: Size::from((150, 80)),
             sent: None,
             end_since: None,
         };

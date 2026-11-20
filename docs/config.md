@@ -63,9 +63,6 @@ config({
   general: {
     border: { active: "#8ab4f8", inactive: "#3c4043" },
   },
-  overview: {
-    card_color: "#202124",
-  },
 });
 ```
 
@@ -127,7 +124,6 @@ function that writes the same key without repeating the surrounding object.
 | `input` | `config()` | Keyboard layout and libinput device settings. |
 | `window_drag` | `config()` | Interactive move and resize behaviour. |
 | `fullscreen` | `config()` | Fullscreen behaviour. |
-| `overview` | `config()` | Workspace overview appearance. |
 | `errors` | `config()` | Additional error reporting channels. |
 | `xwayland` | `config()` | X11 support through `xwayland-satellite`. |
 | `keybinds` | `bind()` | Bindings from key, mouse button or scroll trigger to actions. |
@@ -195,7 +191,6 @@ config({
       window_movement: { curve: "ease-out-cubic" },
       window_resize: { curve: "ease-out-cubic" },
       workspace_switch: { curve: "ease-out-cubic" },
-      overview: { curve: "ease-out-cubic" },
     },
   },
 });
@@ -211,7 +206,6 @@ config({
 | `window_movement` | `ease-out-cubic` | Moving a window without resizing it. |
 | `window_resize` | `ease-out-cubic` | Resizing a window. |
 | `workspace_switch` | `ease-out-cubic` | Sliding between workspaces. |
-| `overview` | `ease-out-cubic` | Opening and closing the workspace overview. |
 
 Each category accepts `duration` (milliseconds, 0-10000) and `curve`. Supported
 curves are `"linear"`, `"ease-out-quad"`, `"ease-out-cubic"` and
@@ -328,9 +322,7 @@ compositor blurs the wallpaper once per output, and every blurred window, bar or
 panel samples that shared copy. A blurred window then shows the wallpaper rather
 than the windows behind it, and moving or animating a window does not re-run the
 blur: only a change of the wallpaper, of the blur parameters or of the output
-geometry does. While the workspace overview is open the shared copy is taken
-after the overview backdrop and the workspace cards are drawn, so it stays in
-step with what the cards show.
+geometry does.
 
 The shared copy is made of the output background and the `background` and
 `bottom` layer surfaces, which is why those layers keep no client-requested blur
@@ -545,7 +537,6 @@ Actions without arguments:
 | `focus-workspace-up`, `focus-workspace-down` | Move through the output's workspace stack. |
 | `move-window-to-workspace-up`, `move-window-to-workspace-down` | Move the focused window and follow it. |
 | `move-workspace-up`, `move-workspace-down` | Swap the active workspace with its neighbour. |
-| `toggle-overview` | Open or close the workspace overview. |
 
 Closing or unmapping the focused window hands the keyboard to its neighbour in
 the layout order: the window before it in `ctx.windows`, or the one after it
@@ -755,34 +746,6 @@ config({
 `cover_top_layer` (default `true`) makes a compositor-managed fullscreen window
 cover Top layer-shell surfaces. `policy` currently accepts only `"auto"`; other
 values produce a warning and behave like `"auto"`.
-
-## `overview`
-
-The workspace overview is the zoomed-out stack of workspaces.
-
-```js
-config({
-  overview: {
-    zoom: 0.5,
-    backdrop_color: "#262626",
-    card_color: "#404040",
-    shadow: {
-      enable: true,
-      blur: 40,
-      spread: 10,
-      offset: [0, 10],
-      color: "#00000050",
-    },
-  },
-});
-```
-
-| Key | Default | Description |
-| --- | --- | --- |
-| `zoom` | `0.5` | Card scale at full overview. Range: 0.0001-0.75. |
-| `backdrop_color` | `#262626` | Colour behind the stack of cards. |
-| `card_color` | `#404040` | Background colour of each workspace card. |
-| `shadow` | see above | Card shadow; accepts the same fields as `general.shadow`. |
 
 ## `errors`
 
@@ -1059,8 +1022,6 @@ config({
     escape_cancels: true,
   },
 
-  overview: { zoom: 0.5 },
-
   xwayland: { enable: true, on_demand: true },
 });
 
@@ -1075,7 +1036,6 @@ bind("Mod+Shift+Left", "move-window-left");
 bind("Mod+Shift+Right", "move-window-right");
 bind("Mod+1", { focus_workspace: 1 });
 bind("Mod+2", { focus_workspace: 2 });
-bind("Mod+O", "toggle-overview");
 bind("Mod+R", "reload-config");
 bind("Mod+MouseLeft", "move-window");
 bind("Mod+MouseRight", "resize-window");

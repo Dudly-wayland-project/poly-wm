@@ -9,15 +9,6 @@
 //! Bottom/Background layers. A window itself contributes its popups, its
 //! surfaces, its border, its shadow and its blur backdrop, in that order.
 //!
-//! The workspace overview follows niri: the cards are
-//! opaque plates of the zoomed workspace, the active one centred with its
-//! neighbours peeking in above and below, a soft shadow behind the stack and an
-//! opaque backdrop around it. Windows keep their rounding, border and shadow,
-//! scaled with the card; blur and popups are dropped there. Everything lands
-//! behind the windows but in front of the Bottom/Background layers, so the
-//! wallpaper is covered while the overview is open (niri crops it into the
-//! cards instead).
-//!
 //! Every visual feature is optional and off by default: with the default
 //! configuration a window is a plain, unclipped surface.
 
@@ -27,7 +18,7 @@ mod elements;
 mod shaders;
 pub mod visual;
 
-pub use blur::{XrayBuffer, XrayCaptureElement, XrayOverview, XrayState};
+pub use blur::{XrayBuffer, XrayCaptureElement, XrayState};
 pub use decorations::Decorations;
 pub use elements::{
     AsGlesRenderer, OutputElements, PolyRenderer, ShaderElement, WindowClip, WindowElement,
@@ -43,7 +34,6 @@ use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::Id;
 use smithay::backend::renderer::element::Kind;
-use smithay::backend::renderer::element::NamespacedElement;
 use smithay::backend::renderer::element::RenderElementStates;
 use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::backend::renderer::element::solid::{SolidColorBuffer, SolidColorRenderElement};
@@ -52,7 +42,7 @@ use smithay::backend::renderer::element::surface::{
 };
 use smithay::backend::renderer::element::texture::{TextureBuffer, TextureRenderElement};
 use smithay::backend::renderer::element::utils::{
-    CropRenderElement, Relocate, RelocateRenderElement, RescaleRenderElement,
+    CropRenderElement, Relocate, RelocateRenderElement,
 };
 use smithay::backend::renderer::element::{Element, RenderElement};
 use smithay::backend::renderer::gles::element::PixelShaderElement;
@@ -72,15 +62,14 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::user_data::UserDataMap;
 use smithay::utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Size, Transform};
 use smithay::wayland::background_effect::BackgroundEffectSurfaceCachedState;
-use smithay::wayland::compositor::{RectangleKind, with_states};
+use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::wlr_layer::Layer;
 use tracing::{debug, warn};
 
 use crate::core::Core;
-use crate::core::DragHintBuffers;
-use crate::core::OverviewBuffers;
+use crate::core::DragHintKey;
 use crate::core::capture::{CaptureKey, CaptureOutcome, CaptureState};
-use crate::core::cursor::{buffer_from_image, cursor_hotspot, is_dead_cursor_surface};
+use crate::core::cursor::{buffer_from_image, cursor_hotspot, is_dead_cursor_surface, named_icon};
 use crate::core::layout::FullscreenMode;
 use crate::core::layout::LayoutManager;
 use crate::core::layout::WorkspaceView;
@@ -213,14 +202,12 @@ where
     // Snapshot the windows so rendering does not hold a borrow of the layout
     // while the fullscreen backgrounds and the decoration cache are updated.
     let view = core.layout.view(output, output_geometry, now);
-    let overview_zoom = (view.overview > 0.0).then_some(view.zoom);
-    let overview = overview_zoom.is_some();
 
     // The shared xray backdrop: one blurred copy of the wallpaper per output.
     // Everything that decides its content is snapshotted here, so a still
     // wallpaper only costs a capture when it actually changes.
     let xray = if core.config.general.blur.enable && core.config.general.blur.xray {
-        let state = xray_state(core, renderer, output, output_geometry, &view, scale, time);
+        let state = xray_state(core, renderer, output, output_geometry, scale, time);
         let buffer = core
             .xray_buffers
             .entry(output.clone())
@@ -247,10 +234,10 @@ where
             continue;
         }
         let open_scale = managed.open_scale_at(now);
-        // `placed.rect` is the workspace/overview projection of the layout
-        // rectangle. Do not use `managed.open_rect_at` here: that is still in
-        // layout coordinates, and would draw every workspace (and the overview)
-        // at the active card's position. Scale the projected rectangle around
+        // `placed.rect` is the workspace projection of the layout rectangle.
+        // Do not use `managed.open_rect_at` here: that is still in layout
+        // coordinates, and would draw every workspace at the active card's
+        // position. Scale the projected rectangle around
         // its own centre for the opening animation instead.
         let rect = scaled_rect(placed.rect, open_scale);
         let entry = RenderWindow {
@@ -289,9 +276,7 @@ where
         xray.as_ref(),
     );
     push_toasts(&mut elements, core, renderer, output, scale);
-    // In the overview a fullscreen window is just another card, so it must not
-    // cover the Top layer (the bar stays visible above the cards).
-    let cover_top = !overview && core.config.fullscreen.cover_top_layer && !fullscreen.is_empty();
+    let cover_top = core.config.fullscreen.cover_top_layer && !fullscreen.is_empty();
     if !cover_top {
         push_layers(
             &mut elements,
@@ -305,9 +290,6 @@ where
         );
     }
 
-    // In the overview a compositor-managed fullscreen window is just another
-    // card-sized window, so the black frame behind it is not drawn (it would
-    // cover the card background anyway).
     // Closing windows are drawn above their former stacking group for the
     // duration of the fade. The fullscreen backdrop is pushed after this, so it
     // stays behind the closing snapshot.
@@ -330,13 +312,9 @@ where
             output_geometry,
             scale,
             time,
-            overview_zoom,
             false,
             xray.as_ref(),
         );
-        if overview {
-            continue;
-        }
         let buffer = core
             .fullscreen_backgrounds
             .entry(output.clone())
@@ -384,7 +362,6 @@ where
             output_geometry,
             scale,
             time,
-            overview_zoom,
             false,
             xray.as_ref(),
         );
@@ -398,17 +375,13 @@ where
             output_geometry,
             scale,
             time,
-            overview_zoom,
             false,
             xray.as_ref(),
         );
     }
     // Niri-style drop indicator: the slot the dragged tiled window will land
-    // in, drawn above the tiled windows but below the dragged one. It is not
-    // meaningful while the overview is open.
-    if !overview {
-        push_drag_hint(&mut elements, core, output, output_geometry, scale, now);
-    }
+    // in, drawn above the tiled windows but below the dragged one.
+    push_drag_hint(&mut elements, core, output, output_geometry, scale, now);
     push_closing(
         &mut elements,
         core,
@@ -428,31 +401,15 @@ where
             output_geometry,
             scale,
             time,
-            overview_zoom,
             false,
             xray.as_ref(),
         );
     }
-    // The background group: the overview backdrop and cards, then the wallpaper
-    // layers. It is built separately because the xray capture element *owns* it
+    // The background group: the wallpaper layers. It is built separately because the xray capture element *owns* it
     // (see below): the capture repaints it itself instead of reading whatever
     // the framebuffer happens to contain, which may still show a window that has
     // since moved away.
     let mut backdrop: Vec<OutputElements<R>> = Vec::new();
-    if overview {
-        // Cards, card shadows and the backdrop go behind the windows. Each
-        // card also gets a scaled copy of the Bottom/Background layers, so the
-        // wallpaper is visible inside the thumbnails like it is in niri.
-        push_overview(
-            &mut backdrop,
-            core,
-            renderer,
-            output,
-            output_geometry,
-            &view,
-            scale,
-        );
-    }
     push_layers(
         &mut backdrop,
         core,
@@ -502,7 +459,6 @@ fn xray_state<R>(
     renderer: &mut R,
     output: &Output,
     output_geometry: Rectangle<i32, Logical>,
-    view: &WorkspaceView,
     scale: f64,
     time: f32,
 ) -> XrayState
@@ -529,20 +485,6 @@ where
         }
     }
 
-    // The overview fades its backdrop and cards in over the wallpaper, so both
-    // are part of the captured content while it is open.
-    let overview = (view.overview > 0.0).then(|| {
-        return XrayOverview {
-            progress: view.overview,
-            zoom: view.zoom,
-            cards: view
-                .cards
-                .iter()
-                .map(|card| return (card.index, card.rect))
-                .collect(),
-        };
-    });
-
     // A custom `finish()` may read `u_time`; the shared texture then has to be
     // re-blurred every frame, exactly like the per-window backdrop is.
     let uses_time = core
@@ -566,263 +508,7 @@ where
         } else {
             0
         },
-        overview,
     };
-}
-
-/// A cached card shadow element.
-///
-/// Rebuilding the `PixelShaderElement` every frame would give it a fresh `Id`,
-/// so the damage tracker would consider the whole card stack new on every
-/// frame — a pure cursor move would repaint every card. The key covers every
-/// uniform and the shader generation.
-#[derive(Debug)]
-pub struct CardShadowCache {
-    key: CardShadowKey,
-    element: ShaderElement,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct CardShadowKey {
-    area: Rectangle<i32, Logical>,
-    window_offset: [f32; 2],
-    window_size: [f32; 2],
-    sigma: f32,
-    spread: f32,
-    offset: [f32; 2],
-    color: [f32; 4],
-    alpha: f32,
-    scale: f32,
-    epoch: u64,
-}
-
-/// Draw the `layers` (already positioned in output space) a second time,
-/// scaled around the card's top-left and cropped to the card.
-///
-/// This puts the wallpaper (and any Bottom layer) inside the overview cards,
-/// which is what niri does: the workspace is a scaled copy of the output, so
-/// everything that is not a window scales with it.
-#[allow(clippy::too_many_arguments)]
-fn push_card_layers<R>(
-    elements: &mut Vec<OutputElements<R>>,
-    renderer: &mut R,
-    output: &Output,
-    layers: &[Layer],
-    scale: f64,
-    card: Rectangle<i32, Logical>,
-    namespace: usize,
-    zoom: f64,
-) where
-    R: PolyRenderer,
-    R::TextureId: Clone + Send + 'static,
-{
-    if card.size.w <= 0 || card.size.h <= 0 || zoom <= 0.0 {
-        return;
-    }
-    let origin = card.loc.to_f64().to_physical_precise_round(scale);
-    let crop = card.to_f64().to_physical_precise_round(scale);
-    let map = layer_map_for_output(output);
-    for layer in layers {
-        for surface in map.layers_on(*layer).rev() {
-            let Some(geometry) = map.layer_geometry(surface) else {
-                continue;
-            };
-            let location = Point::<i32, Logical>::from((geometry.loc.x, geometry.loc.y))
-                .to_physical_precise_round(scale);
-            let rendered = render_elements_from_surface_tree::<R, WaylandSurfaceRenderElement<R>>(
-                renderer,
-                surface.wl_surface(),
-                location,
-                Scale::from(scale),
-                1.0,
-                Kind::Unspecified,
-            );
-            for element in rendered {
-                let scaled = RescaleRenderElement::from_element(element, origin, zoom);
-                // A layer surface may be larger than or offset from the
-                // output; the card crop keeps the thumbnail clean.
-                let Some(cropped) = CropRenderElement::from_element(scaled, scale, crop) else {
-                    continue;
-                };
-                elements.push(OutputElements::Card(NamespacedElement::new(
-                    cropped, namespace,
-                )));
-            }
-        }
-    }
-}
-
-/// Add the workspace cards, their shadows and the backdrop of the overview.
-///
-/// This mirrors niri's `Monitor::render_workspaces` / `render_workspace_shadows`
-/// order: every card is an opaque plate the size of the
-/// zoomed workspace, the whole stack casts a soft shadow, and an opaque
-/// backdrop fills the desktop around it. Everything is pushed after the
-/// windows, i.e. *behind* them, so the cards read as backgrounds. Inside every
-/// card the Bottom/Background layer surfaces are drawn again, scaled and
-/// cropped, so the wallpaper shows in the thumbnails (the originals stay
-/// behind the backdrop, which fades in over them).
-fn push_overview<R>(
-    elements: &mut Vec<OutputElements<R>>,
-    core: &mut Core,
-    renderer: &mut R,
-    output: &Output,
-    output_geometry: Rectangle<i32, Logical>,
-    view: &crate::core::layout::WorkspaceView,
-    scale: f64,
-) where
-    R: PolyRenderer,
-    R::TextureId: Clone + Send + 'static,
-{
-    // Fade the plates in with the zoom: at the first frame they still cover
-    // the whole screen and would otherwise pop.
-    let fade = view.overview.clamp(0.0, 1.0) as f32;
-    if fade <= 0.001 {
-        return;
-    }
-    let config = core.config.overview.clone();
-    // niri forces the backdrop opaque so the desktop behind the cards never
-    // bleeds through.
-    let mut backdrop_color = config.backdrop_color.to_floats();
-    backdrop_color[3] = 1.0;
-    let card_color = config.card_color.to_floats();
-    // Clone the program up front: the buffer borrow below is mutable.
-    let shadow_program = core.shaders.shadow().cloned();
-    let shader_epoch = core.shaders.epoch();
-
-    let buffers = core
-        .overview_buffers
-        .entry(output.clone())
-        .or_insert_with(OverviewBuffers::new);
-
-    for card in view.cards.iter().rev() {
-        let local = Rectangle::new(card.rect.loc - output_geometry.loc, card.rect.size);
-        if local.size.w <= 0 || local.size.h <= 0 {
-            continue;
-        }
-        // Cards pushed off the output by the zoom (or by a long workspace
-        // stack) cost nothing: the damage tracker culls them anyway, and
-        // allocating a buffer for each of them would waste memory.
-        if local
-            .intersection(Rectangle::from_size(output_geometry.size))
-            .is_none()
-        {
-            continue;
-        }
-        // Bottom/Background layers belong to the output, not to a workspace;
-        // repeat them scaled into every card so the wallpaper is visible in
-        // the thumbnail (niri draws its per-workspace background there too).
-        push_card_layers(
-            elements,
-            renderer,
-            output,
-            &[Layer::Bottom, Layer::Background],
-            scale,
-            local,
-            card.index,
-            view.zoom,
-        );
-        let buffer = buffers.card_mut(card.index);
-        buffer.update(local.size, card_color);
-        elements.push(OutputElements::Solid(SolidColorRenderElement::from_buffer(
-            buffer,
-            local.loc.to_physical_precise_round(scale),
-            scale,
-            fade,
-            Kind::Unspecified,
-        )));
-    }
-
-    // Card shadows come after (behind) the cards, like niri: the shadow is
-    // drawn around the plate, never on top of it.
-    if let Some(program) = shadow_program {
-        let shadow_color = config.shadow.color.to_floats();
-        if config.shadow.enable && shadow_color[3] > 0.0 {
-            // niri normalizes the workspace shadow to 1080p and then scales it
-            // with the card (`compute_workspace_shadow_config`).
-            let norm = f64::from(output_geometry.size.h) / 1080.0 * view.zoom;
-            let sigma = (config.shadow.blur * 0.5 * norm) as f32;
-            let spread = (config.shadow.spread * norm) as f32;
-            let offset_x = (f64::from(config.shadow.offset_x) * norm).round() as i32;
-            let offset_y = (f64::from(config.shadow.offset_y) * norm).round() as i32;
-            for card in view.cards.iter().rev() {
-                let local = Rectangle::new(card.rect.loc - output_geometry.loc, card.rect.size);
-                if local
-                    .intersection(Rectangle::from_size(output_geometry.size))
-                    .is_none()
-                {
-                    continue;
-                }
-                let Some(area) =
-                    visual::shadow_rect(local, sigma, spread.round() as i32, offset_x, offset_y)
-                else {
-                    continue;
-                };
-                let key = CardShadowKey {
-                    area,
-                    window_offset: [
-                        (local.loc.x - area.loc.x) as f32,
-                        (local.loc.y - area.loc.y) as f32,
-                    ],
-                    window_size: [local.size.w as f32, local.size.h as f32],
-                    sigma,
-                    spread,
-                    offset: [offset_x as f32, offset_y as f32],
-                    color: shadow_color,
-                    alpha: fade,
-                    scale: scale as f32,
-                    epoch: shader_epoch,
-                };
-                let build = || {
-                    let uniforms = vec![
-                        Uniform::new("shadow_color", shadow_color),
-                        Uniform::new("sigma", sigma),
-                        Uniform::new("spread", spread),
-                        Uniform::new("poly_scale", scale as f32),
-                        Uniform::new("window_offset", key.window_offset),
-                        Uniform::new("window_size", key.window_size),
-                        Uniform::new("window_corner_radius", [0.0_f32; 4]),
-                        Uniform::new("shadow_offset", key.offset),
-                    ];
-                    return ShaderElement::new(PixelShaderElement::new(
-                        program.clone(),
-                        area,
-                        None,
-                        fade,
-                        uniforms,
-                        Kind::Unspecified,
-                    ));
-                };
-                let slot = buffers.shadow_mut(card.index);
-                let cached = slot
-                    .as_ref()
-                    .filter(|cached| return cached.key == key)
-                    .map(|cached| return cached.element.clone());
-                let element = match cached {
-                    Some(element) => element,
-                    None => {
-                        let element = build();
-                        *slot = Some(CardShadowCache {
-                            key,
-                            element: element.clone(),
-                        });
-                        element
-                    }
-                };
-                elements.push(OutputElements::Shader(element));
-            }
-        }
-    }
-
-    let backdrop = buffers.backdrop_mut();
-    backdrop.update(output_geometry.size, backdrop_color);
-    elements.push(OutputElements::Solid(SolidColorRenderElement::from_buffer(
-        backdrop,
-        (0, 0),
-        scale,
-        fade,
-        Kind::Unspecified,
-    )));
 }
 
 /// Scale a rectangle around its centre, rounding to whole logical pixels.
@@ -868,7 +554,12 @@ fn push_drag_hint<R>(
     R: PolyRenderer,
     R::TextureId: Clone + Send + 'static,
 {
-    let Some((workspace, rect)) = core.layout.drag_hint_for(output) else {
+    let Some((workspace, rect, visuals)) = core
+        .layout
+        .drag_hint_for(output)
+        .map(|(workspace, rect, managed)| return (workspace, rect, managed.visuals.clone()))
+    else {
+        core.drag_hint_buffers = None;
         return;
     };
     // `rect` is workspace-local; project it exactly like the windows.
@@ -880,28 +571,58 @@ fn push_drag_hint<R>(
     if local.size.w <= 0 || local.size.h <= 0 {
         return;
     }
-    let buffers = core
-        .drag_hint_buffers
-        .get_or_insert_with(DragHintBuffers::new);
-    let fill = [0.36f32, 0.58, 1.0, 0.22];
-    let fill_buffer = buffers.fill_mut();
-    fill_buffer.update(local.size, fill);
-
-    let location: Point<i32, smithay::utils::Physical> = local.loc.to_physical_precise_round(scale);
-    elements.push(OutputElements::Solid(SolidColorRenderElement::from_buffer(
-        &*fill_buffer,
-        location,
+    let Some(program) = core.shaders.border().cloned() else {
+        return;
+    };
+    // niri's insert hint: the slot drawn with the window's own corners, in
+    // the active border color: a soft fill under a solid outline.
+    let color = visuals.border_active;
+    let key = DragHintKey {
+        rect: local,
         scale,
-        1.0,
-        Kind::Unspecified,
-    )));
+        color,
+        width: visuals.border_width.round().clamp(2.0, 4.0),
+        radius: <[f32; 4]>::from(
+            visuals
+                .radius
+                .fit_to(local.size.w as f32, local.size.h as f32),
+        ),
+    };
+    let hint = core.drag_hint_buffers.get_or_insert_with(Default::default);
+    if hint.key != Some(key) {
+        let fill_color = [color[0], color[1], color[2], color[3] * 0.25];
+        // The border shader with a border wider than the slot fills the whole
+        // rounded rectangle; the clip is opened up because there is no window
+        // inside to measure it against.
+        let open_clip = [-1.0e9f32, -1.0e9, 1.0e9, 1.0e9];
+        let element = |color: [f32; 4], width: f32| {
+            return ShaderElement::new(PixelShaderElement::new(
+                program.clone(),
+                local,
+                None,
+                1.0,
+                vec![
+                    Uniform::new("poly_scale", scale as f32),
+                    Uniform::new("border_color", color),
+                    Uniform::new("border_width", width),
+                    Uniform::new("corner_radius", key.radius),
+                    Uniform::new("poly_card_clip", open_clip),
+                ],
+                Kind::Unspecified,
+            ));
+        };
+        let fill_width = local.size.w.max(local.size.h) as f32;
+        hint.elements = vec![element(color, key.width), element(fill_color, fill_width)];
+        hint.key = Some(key);
+    }
+    elements.extend(hint.elements.iter().cloned().map(OutputElements::Shader));
 }
 
 /// The workspace card in window-geometry space (`x0, y0, x1, y1`), or `None`
 /// when the card fully contains the window.
 ///
 /// The shader discards fragments outside this rectangle, so a floating window
-/// cannot paint over the gap or the next overview card.
+/// cannot paint over a neighbouring workspace during a slide.
 fn card_clip(rect: Rectangle<i32, Logical>, card: Rectangle<i32, Logical>) -> Option<[f32; 4]> {
     if rect.size.w <= 0 || rect.size.h <= 0 {
         return None;
@@ -928,7 +649,7 @@ enum ClosingGroup {
 ///
 /// The snapshot is scaled around the window centre while it fades, exactly like
 /// niri's closing animation, and cropped to its workspace card so it cannot
-/// paint over a neighbouring card in the overview.
+/// paint over a neighbouring workspace during a slide.
 #[allow(clippy::too_many_arguments)]
 fn push_closing<R>(
     elements: &mut Vec<OutputElements<R>>,
@@ -1023,7 +744,6 @@ fn push_window<R>(
     output_geometry: Rectangle<i32, Logical>,
     scale: f64,
     time: f32,
-    overview: Option<f64>,
     snapshot: bool,
     xray: Option<&Rc<RefCell<XrayBuffer>>>,
 ) where
@@ -1042,15 +762,15 @@ fn push_window<R>(
     let card_rect = Rectangle::new(managed.card.loc - output_geometry.loc, managed.card.size);
     let card_bounds = card_clip(local_rect, card_rect);
 
-    // Animation/overview rescale factors (1, 1) when nothing is animating.
+    // Animation rescale factors (1, 1) when nothing is animating.
     let sx = managed.rect.size.w as f64 / f64::from(geometry.size.w.max(1));
     let sy = managed.rect.size.h as f64 / f64::from(geometry.size.h.max(1));
     let rescale = Scale::from((sx, sy));
 
     // Output-local logical location of the window's surface tree. The surface
     // geometry offset (CSD shadows and the like) belongs to the window content,
-    // so it is scaled with it — otherwise a zoomed-out thumbnail would show its
-    // client-side decorations shifted by `(1 - zoom) * offset`.
+    // so it is scaled with it — otherwise a scaled window would show its
+    // client-side decorations shifted by `(1 - scale) * offset`.
     let offset = geometry
         .loc
         .to_f64()
@@ -1061,20 +781,13 @@ fn push_window<R>(
         .to_physical_precise_round(scale)
         - offset;
 
-    // In the overview a window is a shrunken copy of itself: radius, border
-    // width and shadow scale with the card, the blur pass is dropped, and the
-    // popups are not drawn (they would float outside the card). The opening
-    // animation scales the same decorations but keeps the blur, so a blurred
-    // window does not pop when the animation ends.
-    let scaled = match overview {
-        Some(zoom) => Some(managed.visuals.scaled(zoom * managed.scale)),
-        None if managed.scale < 0.9999 => Some(managed.visuals.scaled_animation(managed.scale)),
-        None => None,
-    };
+    // The opening animation scales radius, border width and shadow with the
+    // window but keeps the blur, so a blurred window does not pop when the
+    // animation ends.
+    let scaled =
+        (managed.scale < 0.9999).then(|| return managed.visuals.scaled_animation(managed.scale));
     let visuals = scaled.as_ref().unwrap_or(&managed.visuals);
-    // A fullscreen window keeps its own output when the overview is closed; in
-    // the overview it is a normal card-sized window with the usual border.
-    let fullscreen = overview.is_none() && managed.fullscreen == Some(FullscreenMode::Fullscreen);
+    let fullscreen = managed.fullscreen == Some(FullscreenMode::Fullscreen);
     let focused = core
         .last_window_focus
         .as_ref()
@@ -1169,10 +882,9 @@ fn push_window<R>(
 
     // Popups belong to the window but are not clipped: they may extend past
     // the rounded corners and have their own buffers.
-    // The overview leaves them out, and so does a window that is still scaling
-    // in: their offsets are not rescaled with the surface. Close snapshots do
+    // A window that is still scaling in leaves them out: their offsets are not rescaled with the surface. Close snapshots do
     // include them while the window is at its settled size.
-    if overview.is_none() && managed.scale >= 0.9999 {
+    if managed.scale >= 0.9999 {
         for (popup, popup_offset) in PopupManager::popups_for_surface(&managed.root) {
             let offset = (geometry.loc + popup_offset - popup.geometry().loc)
                 .to_physical_precise_round(scale);
@@ -1298,20 +1010,9 @@ fn client_blur_region(
 
     // The protocol region is an ordered add/subtract list, so a client can cut a
     // hole out of its backdrop.
-    let mut added: Vec<Rectangle<i32, Logical>> = Vec::new();
-    let mut cut: Vec<Rectangle<i32, Logical>> = Vec::new();
-    for (kind, rect) in region.rects {
-        match kind {
-            RectangleKind::Add => added.push(rect),
-            RectangleKind::Subtract => cut.push(rect),
-        }
-    }
-    if !cut.is_empty() {
-        added = Rectangle::subtract_rects_many_in_place(added, cut);
-    }
-
-    let mut out = Vec::with_capacity(added.len());
-    for rect in added {
+    let rects = crate::utils::region::region_to_non_overlapping_rects(&region);
+    let mut out = Vec::with_capacity(rects.len());
+    for rect in rects {
         out.push(place_client_rect(rect, local_rect, geometry, rescale));
     }
     return Some(out);
@@ -1324,15 +1025,18 @@ fn place_client_rect(
     geometry: Rectangle<i32, Logical>,
     rescale: Scale<f64>,
 ) -> Rectangle<i32, Logical> {
-    let loc = Point::from((
-        (f64::from(rect.loc.x - geometry.loc.x) * rescale.x).round() as i32,
-        (f64::from(rect.loc.y - geometry.loc.y) * rescale.y).round() as i32,
-    ));
-    let size = Size::from((
-        (f64::from(rect.size.w) * rescale.x).round() as i32,
-        (f64::from(rect.size.h) * rescale.y).round() as i32,
-    ));
-    return Rectangle::new(local_rect.loc + loc, size);
+    // Round the extremities rather than location and size, so strips that
+    // touch before the rescale still touch after it.
+    let map =
+        |v: i32, origin: i32, factor: f64| return (f64::from(v - origin) * factor).round() as i32;
+    let x1 = map(rect.loc.x, geometry.loc.x, rescale.x);
+    let y1 = map(rect.loc.y, geometry.loc.y, rescale.y);
+    let x2 = map(rect.loc.x + rect.size.w, geometry.loc.x, rescale.x);
+    let y2 = map(rect.loc.y + rect.size.h, geometry.loc.y, rescale.y);
+    return Rectangle::from_extremities(
+        (local_rect.loc.x + x1, local_rect.loc.y + y1),
+        (local_rect.loc.x + x2, local_rect.loc.y + y2),
+    );
 }
 
 /// Pointer position in window coordinates, or a negative point when the
@@ -1502,29 +1206,17 @@ fn layer_blur_regions(
     })?;
 
     // The protocol region is an ordered add/subtract list, so a client can cut
-    // holes into its backdrop.
-    let mut added: Vec<Rectangle<i32, Logical>> = Vec::new();
-    let mut cut: Vec<Rectangle<i32, Logical>> = Vec::new();
-    for (kind, region) in region.rects {
-        match kind {
-            RectangleKind::Add => added.push(region),
-            RectangleKind::Subtract => cut.push(region),
-        }
-    }
-    if !cut.is_empty() {
-        added = Rectangle::subtract_rects_many_in_place(added, cut);
-    }
-
-    let mut placed = Vec::with_capacity(added.len());
-    for region in added {
+    // holes into its backdrop. The conversion keeps every strip of a
+    // tessellated rounded shape, so the corners stay sharp.
+    let mut placed = Vec::new();
+    for region in crate::utils::region::region_to_non_overlapping_rects(&region) {
         let rect_on_output = Rectangle::new(rect.loc + region.loc, region.size);
         let Some(inside) = rect_on_output.intersection(rect) else {
             continue;
         };
         placed.push(Rectangle::new(inside.loc - rect.loc, inside.size));
     }
-    let disjoint = decorations::disjoint_pieces(placed);
-    return (!disjoint.is_empty()).then_some(disjoint);
+    return (!placed.is_empty()).then_some(placed);
 }
 
 /// Add the Toast stack of the compositor, centered at the top of the output.
@@ -1599,9 +1291,18 @@ pub fn push_cursor<R>(
     }
 
     let scale = output.current_scale();
-    let image = core
-        .cursor
-        .get_image(scale.integer_scale() as u32, core.start_time.elapsed());
+    let icon = named_icon(&core.cursor_status);
+    let image = core.cursor.get_image(
+        icon,
+        scale.integer_scale() as u32,
+        core.start_time.elapsed(),
+    );
+    // A themed shape has its own hotspot (the I-beam's is in the middle); it
+    // is in buffer pixels of an image drawn at the output's integer scale.
+    let named_hotspot = Point::<i32, Logical>::from((
+        image.xhot as i32 / scale.integer_scale().max(1),
+        image.yhot as i32 / scale.integer_scale().max(1),
+    ));
 
     let buffer = core
         .pointer_images
@@ -1616,7 +1317,10 @@ pub fn push_cursor<R>(
     core.cursor_element.set_buffer(buffer);
     core.cursor_element.set_status(core.cursor_status.clone());
 
-    let hotspot = cursor_hotspot(&core.cursor_status);
+    let hotspot = match core.cursor_status {
+        CursorImageStatus::Named(_) => named_hotspot,
+        _ => cursor_hotspot(&core.cursor_status),
+    };
     let location = (pointer_location - output_geometry.loc.to_f64() - hotspot.to_f64())
         .to_physical(scale.fractional_scale())
         .to_i32_round();
@@ -1629,16 +1333,17 @@ pub fn push_cursor<R>(
 
 /// Tell the clients whose content is on `output` that a frame was presented.
 ///
-/// Windows on inactive workspaces are skipped: they are off screen (or a
-/// scaled card in the overview), and keeping their frame callbacks flowing
+/// Windows on inactive workspaces are skipped: they are off screen, and keeping their frame callbacks flowing
 /// would make them render frames nobody sees.
 pub fn send_frame_callbacks(core: &mut Core, output: &Output, time: Duration) {
-    let now = Instant::now();
-    let overview = core.layout.overview_visible(now);
     let active = core.layout.active_workspace(output);
-    for window in core.space.elements() {
-        // A window is only drawn on the output that owns its workspace, even
-        // while the overview shows every workspace of that output. Two outputs
+    let windows = core.space.elements().cloned().collect::<Vec<_>>();
+    for window in &windows {
+        // A window that was just configured gets its callback now, even when
+        // it is throttled or hidden, so it can draw the new size on this frame
+        // instead of one throttle interval later (niri does the same).
+        let forced = core.layout.take_frame_callback_request(window);
+        // A window is only drawn on the output that owns its workspace. Two outputs
         // can show the same workspace index at once, so comparing the index
         // alone would send a callback for an output the window is not on (and
         // wake its client for nothing).
@@ -1647,9 +1352,9 @@ pub fn send_frame_callbacks(core: &mut Core, output: &Output, time: Duration) {
             .by_window(window)
             .and_then(|managed| return core.layout.workspace_of(managed.id))
             .is_none_or(|(owner, workspace)| {
-                return &owner == output && (overview || workspace == active);
+                return &owner == output && workspace == active;
             });
-        if !visible {
+        if !visible && !forced {
             continue;
         }
         window.send_frame(output, time, FRAME_CALLBACK_THROTTLE, |_, _| {
@@ -1799,7 +1504,6 @@ pub fn snapshot_window(
         output_geometry,
         output_scale,
         time,
-        None,
         true,
         // A close snapshot has no shared backdrop to sample either.
         None,
@@ -2019,10 +1723,10 @@ pub fn capture_cursor(
 
     // The cursor element is shared with the on-screen rendering, so it is set
     // up exactly like `push_cursor` does before the elements are built.
-    if matches!(core.cursor_status, CursorImageStatus::Named(_)) {
+    if let CursorImageStatus::Named(icon) = core.cursor_status {
         let image = core
             .cursor
-            .get_image(integer.max(1) as u32, core.start_time.elapsed());
+            .get_image(icon, integer.max(1) as u32, core.start_time.elapsed());
         core.cursor_element
             .set_buffer(buffer_from_image(&image, integer.max(1)));
     }
@@ -2051,10 +1755,10 @@ pub fn capture_cursor(
 pub fn cursor_capture_size(core: &Core, integer: i32) -> Option<Size<i32, Physical>> {
     return match &core.cursor_status {
         CursorImageStatus::Hidden => None,
-        CursorImageStatus::Named(_) => {
-            let image = core
-                .cursor
-                .get_image(integer.max(1) as u32, core.start_time.elapsed());
+        CursorImageStatus::Named(icon) => {
+            let image =
+                core.cursor
+                    .get_image(*icon, integer.max(1) as u32, core.start_time.elapsed());
             let size = Size::<i32, Physical>::from((image.width as i32, image.height as i32));
             (size.w > 0 && size.h > 0).then_some(size)
         }
@@ -2076,10 +1780,10 @@ pub fn cursor_capture_size(core: &Core, integer: i32) -> Option<Size<i32, Physic
 /// the scale has to be applied here.
 pub fn cursor_capture_hotspot(core: &Core, integer: i32) -> Point<i32, Buffer> {
     return match &core.cursor_status {
-        CursorImageStatus::Named(_) => {
-            let image = core
-                .cursor
-                .get_image(integer.max(1) as u32, core.start_time.elapsed());
+        CursorImageStatus::Named(icon) => {
+            let image =
+                core.cursor
+                    .get_image(*icon, integer.max(1) as u32, core.start_time.elapsed());
             Point::from((image.xhot as i32, image.yhot as i32))
         }
         CursorImageStatus::Hidden => Point::from((0, 0)),

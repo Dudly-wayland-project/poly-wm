@@ -49,7 +49,7 @@ use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{EventLoop, LoopHandle, LoopSignal, RegistrationToken};
 use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{ClockSource, Logical, Monotonic, Point};
+use smithay::utils::{ClockSource, Logical, Monotonic, Point, Rectangle};
 use smithay::wayland::alpha_modifier::AlphaModifierState;
 use smithay::wayland::background_effect::BackgroundEffectState;
 use smithay::wayland::commit_timing::CommitTimingManagerState;
@@ -102,7 +102,6 @@ use smithay::reexports::wayland_protocols::ext::session_lock::v1::server::ext_se
 use crate::core::cursor::{Cursor, CursorElement};
 use crate::core::input::scroll_tracker::ScrollTracker;
 use crate::core::redraw::OutputState;
-use crate::core::render::CardShadowCache;
 use crate::core::window::UnmappedWindow;
 use crate::state::State;
 
@@ -365,8 +364,6 @@ pub struct Core {
     pub fullscreen_backgrounds: HashMap<Output, SolidColorBuffer>,
     /// Cached solid buffers for the tiled drag drop indicator.
     pub drag_hint_buffers: Option<DragHintBuffers>,
-    /// Cached solid buffers for the workspace overview, per output.
-    pub overview_buffers: HashMap<Output, OverviewBuffers>,
     /// The shared xray backdrop of every output, when `general.blur.xray` is on.
     pub xray_buffers: HashMap<Output, Rc<RefCell<crate::core::render::XrayBuffer>>>,
 
@@ -382,69 +379,32 @@ pub struct Core {
     pub config_generation: u64,
 }
 
-/// Solid buffers for the drag-and-drop indicator: a translucent slot without a
-/// border, so it reads as a shadow of the window that will land there.
+/// The cached drag-and-drop indicator: a translucent rounded slot and its
+/// outline, both in the dragged window's active border color.
+///
+/// The elements are rebuilt only when their key changes, so a pointer that
+/// moves without changing the slot does not damage the output.
+#[derive(Default)]
 pub struct DragHintBuffers {
-    fill: SolidColorBuffer,
+    /// The parameters the cached elements were built from.
+    pub key: Option<DragHintKey>,
+    /// The fill and the outline, in drawing order (outline first).
+    pub elements: Vec<crate::core::render::ShaderElement>,
 }
 
-impl DragHintBuffers {
-    /// Allocate the buffer at unit size; `render.rs` resizes it.
-    pub fn new() -> Self {
-        let clear = [0.0f32, 0.0, 0.0, 0.0];
-        return Self {
-            fill: SolidColorBuffer::new((1, 1), clear),
-        };
-    }
-
-    /// The translucent area.
-    pub fn fill_mut(&mut self) -> &mut SolidColorBuffer {
-        return &mut self.fill;
-    }
-}
-
-/// Solid buffers backing the workspace overview: one card per workspace and
-/// the dark backdrop below the whole stack.
-pub struct OverviewBuffers {
-    cards: Vec<SolidColorBuffer>,
-    backdrop: SolidColorBuffer,
-    shadows: Vec<Option<CardShadowCache>>,
-}
-
-impl OverviewBuffers {
-    /// Allocate the buffers at unit size; `render.rs` resizes them.
-    pub fn new() -> Self {
-        let clear = [0.0f32, 0.0, 0.0, 0.0];
-        return Self {
-            cards: Vec::new(),
-            backdrop: SolidColorBuffer::new((1, 1), clear),
-            shadows: Vec::new(),
-        };
-    }
-
-    /// The card background of workspace `index`, allocated on first use.
-    pub fn card_mut(&mut self, index: usize) -> &mut SolidColorBuffer {
-        while self.cards.len() <= index {
-            self.cards.push(SolidColorBuffer::new((1, 1), [0.0; 4]));
-        }
-        return &mut self.cards[index];
-    }
-
-    /// The cached shadow of workspace `index`, allocated on first use.
-    ///
-    /// The cache is what keeps an idle overview from repainting every card:
-    /// a fresh `PixelShaderElement` would get a new element id on every frame.
-    pub fn shadow_mut(&mut self, index: usize) -> &mut Option<CardShadowCache> {
-        while self.shadows.len() <= index {
-            self.shadows.push(None);
-        }
-        return &mut self.shadows[index];
-    }
-
-    /// The backdrop below every card.
-    pub fn backdrop_mut(&mut self) -> &mut SolidColorBuffer {
-        return &mut self.backdrop;
-    }
+/// What the drag indicator elements depend on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DragHintKey {
+    /// The slot, output-local logical.
+    pub rect: Rectangle<i32, Logical>,
+    /// Output scale.
+    pub scale: f64,
+    /// Active border color.
+    pub color: [f32; 4],
+    /// Outline width.
+    pub width: f32,
+    /// Corner radii of the window.
+    pub radius: [f32; 4],
 }
 
 /// Where the session is in the ext-session-lock handshake.
@@ -728,7 +688,6 @@ impl Core {
             lock_backgrounds: HashMap::new(),
             fullscreen_backgrounds: HashMap::new(),
             drag_hint_buffers: None,
-            overview_buffers: HashMap::new(),
             xray_buffers: HashMap::new(),
             shaders: crate::core::render::Shaders::new(),
             decorations: crate::core::render::Decorations::new(),
@@ -795,12 +754,6 @@ impl Core {
         if self.lock_state.is_locked() {
             return self.lock_surface_under(location);
         }
-        // The overview is a compositor-owned view: pointer and touch input is
-        // interpreted as card clicks and must never reach a client.
-        if self.layout.overview_visible(Instant::now()) {
-            return None;
-        }
-
         let covers_top = self.fullscreen_covers_top(location);
         if let Some(hit) = self.layers_under(
             location,

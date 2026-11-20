@@ -340,11 +340,6 @@ pub enum Event {
         /// The output.
         output: Output,
     },
-    /// The workspace overview opened or closed.
-    OverviewOpenedOrClosed {
-        /// Whether it is open.
-        is_open: bool,
-    },
     /// A configuration load finished, at startup or on `reload-config`.
     ConfigLoaded {
         /// Whether the file had errors (the previous configuration then stays
@@ -378,7 +373,7 @@ mod tests {
             Request::EventStream,
             Request::ReloadConfig,
             Request::XwaylandStatus,
-            Request::Action(Action::ToggleOverview),
+            Request::Action(Action::FocusWorkspaceDown),
             Request::Action(Action::Spawn {
                 command: vec!["foot".into()],
             }),
@@ -473,7 +468,6 @@ mod tests {
                 workspace_index: Some(1),
                 name: "columns".into(),
             },
-            Event::OverviewOpenedOrClosed { is_open: true },
             Event::ConfigLoaded { failed: false },
         ] {
             let line = serde_json::to_string(&event).unwrap();

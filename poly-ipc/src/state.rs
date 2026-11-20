@@ -46,8 +46,6 @@ pub struct EventStreamState {
     pub windows: WindowsState,
     /// Every connected output, keyed by name.
     pub outputs: OutputsState,
-    /// Whether the overview is open.
-    pub overview: OverviewState,
     /// How the last configuration load went.
     pub config: ConfigState,
 }
@@ -59,7 +57,6 @@ impl EventStreamState {
         events.extend(self.workspaces.replicate());
         events.extend(self.windows.replicate());
         events.extend(self.outputs.replicate());
-        events.extend(self.overview.replicate());
         events.extend(self.config.replicate());
         return events;
     }
@@ -69,7 +66,6 @@ impl EventStreamState {
         let event = self.workspaces.apply(event)?;
         let event = self.windows.apply(event)?;
         let event = self.outputs.apply(event)?;
-        let event = self.overview.apply(event)?;
         return self.config.apply(event);
     }
 
@@ -263,29 +259,6 @@ impl EventStreamStatePart for OutputsState {
     }
 }
 
-/// [`EventStreamState::overview`].
-#[derive(Debug, Default, Clone)]
-pub struct OverviewState {
-    /// Whether the workspace overview is open.
-    pub is_open: bool,
-}
-
-impl EventStreamStatePart for OverviewState {
-    fn replicate(&self) -> Vec<Event> {
-        return vec![Event::OverviewOpenedOrClosed {
-            is_open: self.is_open,
-        }];
-    }
-
-    fn apply(&mut self, event: Event) -> Option<Event> {
-        match event {
-            Event::OverviewOpenedOrClosed { is_open } => self.is_open = is_open,
-            other => return Some(other),
-        }
-        return None;
-    }
-}
-
 /// [`EventStreamState::config`].
 #[derive(Debug, Default, Clone)]
 pub struct ConfigState {
@@ -345,7 +318,6 @@ mod tests {
         state.workspaces.workspaces =
             vec![workspace(1, "winit", true), workspace(2, "winit", false)];
         state.windows.windows = vec![window(1), window(2)];
-        state.overview.is_open = true;
         state.config.failed = true;
 
         let events = state.replicate();
@@ -356,7 +328,6 @@ mod tests {
 
         assert_eq!(other.workspaces.workspaces, state.workspaces.workspaces);
         assert_eq!(other.windows.windows, state.windows.windows);
-        assert!(other.overview.is_open);
         assert!(other.config.failed);
         assert_eq!(other.active_workspace().map(|ws| return ws.index), Some(1));
     }

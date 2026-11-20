@@ -16,6 +16,7 @@ niri — https://github.com/YaLTeR/niri
   Ported / adapted files:
     src/utils/signals.rs   <- niri src/utils/signals.rs
     src/utils/spawn.rs     <- niri src/utils/spawning.rs (double-fork, sigmask reset)
+    src/utils/region.rs    <- niri src/utils/region.rs (region to disjoint rectangles)
     src/core/output.rs     <- niri src/niri.rs (RedrawState state machine, frame callbacks)
     src/backend/udev.rs    <- niri src/backend/tty.rs (session resume, estimated vblank timer)
     src/core/render.rs     <- niri src/backend/mod.rs, src/render_helpers/mod.rs

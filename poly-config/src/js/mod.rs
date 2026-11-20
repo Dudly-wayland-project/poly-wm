@@ -508,57 +508,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_overview_settings() {
-        let (config, result) = expect_config(
-            "overview",
-            r##"
-            config({
-                overview: {
-                    zoom: 0.6,
-                    backdrop_color: "#101010",
-                    card_color: "#303030",
-                    shadow: { enable: false, blur: 20, spread: 6, offset: [1, 2], color: "#00000040" },
-                },
-            });
-            "##,
-        );
-
-        let overview = &config.overview;
-        assert!((overview.zoom - 0.6).abs() < f64::EPSILON);
-        assert_eq!(overview.backdrop_color, Color::rgb(0x10, 0x10, 0x10));
-        assert_eq!(overview.card_color, Color::rgb(0x30, 0x30, 0x30));
-        assert!(!overview.shadow.enable);
-        assert_eq!(overview.shadow.blur, 20.0);
-        assert_eq!(overview.shadow.spread, 6.0);
-        assert_eq!((overview.shadow.offset_x, overview.shadow.offset_y), (1, 2));
-        assert_eq!(overview.shadow.color, Color::rgba(0, 0, 0, 0x40));
-        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
-    }
-
-    #[test]
-    fn overview_defaults_follow_niri() {
-        let config = crate::Config::default();
-        let overview = &config.overview;
-        assert!((overview.zoom - 0.5).abs() < f64::EPSILON);
-        assert_eq!(overview.backdrop_color, Color::rgb(0x26, 0x26, 0x26));
-        assert_eq!(overview.card_color, Color::rgb(0x40, 0x40, 0x40));
-        assert!(overview.shadow.enable);
-        assert_eq!(overview.shadow.blur, 40.0);
-        assert_eq!(overview.shadow.spread, 10.0);
-        assert_eq!(
-            (overview.shadow.offset_x, overview.shadow.offset_y),
-            (0, 10)
-        );
-        assert_eq!(overview.shadow.color, Color::rgba(0, 0, 0, 0x50));
-    }
-
-    #[test]
-    fn overview_zoom_out_of_range_is_an_error() {
-        let err = expect_errors("overview-zoom", r##"config({ overview: { zoom: 1.5 } });"##);
-        assert!(err.to_string().contains("overview.zoom"), "{err}");
-    }
-
-    #[test]
     fn parses_visual_settings() {
         let (config, result) = expect_config(
             "visuals",

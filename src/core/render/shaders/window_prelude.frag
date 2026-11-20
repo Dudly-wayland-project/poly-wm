@@ -35,8 +35,8 @@ uniform vec4 corner_radius;
 // Window texture coordinates -> `[0, 1]` window geometry coordinates.
 uniform mat3 input_to_geo;
 // Workspace card in window geometry space (`x0, y0, x1, y1`). Fragments
-// outside are discarded, which keeps floating windows inside their overview
-// thumbnail. `(0, 0, 1, 1)` disables the clip.
+// outside are discarded, which keeps floating windows inside their workspace
+// during a slide. `(0, 0, 1, 1)` disables the clip.
 uniform vec4 poly_card_clip;
 
 // --- Stable aliases for custom shaders --------------------------------------

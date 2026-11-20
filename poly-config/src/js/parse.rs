@@ -14,8 +14,8 @@ use crate::config::{
     AccelProfile, AnimationCurve, AnimationOverride, Animations, Blur, Border, ClickMethod, Color,
     Config, Cursor, Device, Fullscreen, General, Input, Keyboard, LayerInteractivity, LayerRule,
     LayoutOptionValue, ModKey, OutputConfig, OutputMode, OutputPosition, OutputScale,
-    OutputTransform, Overview, ResizePick, ScrollMethod, Shadow, StartupSpawn, TiledDrag,
-    WindowDrag, WindowRule, Xwayland,
+    OutputTransform, ResizePick, ScrollMethod, Shadow, StartupSpawn, TiledDrag, WindowDrag,
+    WindowRule, Xwayland,
 };
 use crate::error::{Errors, path_index, path_key};
 use crate::js::ext as ex;
@@ -35,7 +35,6 @@ const ROOT_KEYS: &[&str] = &[
     "window_rules",
     "outputs",
     "fullscreen",
-    "overview",
     "errors",
     "xwayland",
 ];
@@ -74,9 +73,6 @@ pub(crate) fn parse_config(root: &Table, path: &Path, errors: &mut Errors) -> Co
     }
     if let Some(t) = ex::table(root, "fullscreen", "", errors) {
         config.fullscreen = parse_fullscreen(&t, errors);
-    }
-    if let Some(t) = ex::table(root, "overview", "", errors) {
-        config.overview = parse_overview(&t, errors);
     }
     if let Some(t) = ex::table(root, "errors", "", errors) {
         config.errors = parse_errors(&t, errors);
@@ -254,48 +250,6 @@ fn parse_xwayland(table: &Table, errors: &mut Errors) -> Xwayland {
         xwayland.spawn_at_startup = value;
     }
     return xwayland;
-}
-
-fn parse_overview(table: &Table, errors: &mut Errors) -> Overview {
-    let mut overview = Overview::default();
-    ex::warn_unknown(
-        table,
-        "overview",
-        &["zoom", "backdrop_color", "card_color", "shadow"],
-        errors,
-    );
-    if let Some(value) = ex::number(table, "zoom", "overview", errors) {
-        if (0.0001..=0.75).contains(&value) {
-            overview.zoom = value;
-        } else {
-            errors.error(
-                path_key("overview", "zoom"),
-                "value must be between 0.0001 and 0.75 (niri clamps it the same way)",
-            );
-        }
-    }
-    if let Some(value) = ex::string(table, "backdrop_color", "overview", errors) {
-        match Color::parse(&value) {
-            Some(color) => overview.backdrop_color = color,
-            None => errors.error(
-                path_key("overview", "backdrop_color"),
-                format!("invalid color: {value} (expected #rgb, #rrggbb or #rrggbbaa)"),
-            ),
-        }
-    }
-    if let Some(value) = ex::string(table, "card_color", "overview", errors) {
-        match Color::parse(&value) {
-            Some(color) => overview.card_color = color,
-            None => errors.error(
-                path_key("overview", "card_color"),
-                format!("invalid color: {value} (expected #rgb, #rrggbb or #rrggbbaa)"),
-            ),
-        }
-    }
-    if let Some(t) = ex::table(table, "shadow", "overview", errors) {
-        overview.shadow = parse_shadow(&t, "overview.shadow", overview.shadow, errors);
-    }
-    return overview;
 }
 
 fn parse_border(table: &Table, errors: &mut Errors) -> Border {
@@ -480,7 +434,6 @@ fn parse_animations_at(table: &Table, base: &str, errors: &mut Errors) -> Animat
             "window_movement",
             "window_resize",
             "workspace_switch",
-            "overview",
         ],
         errors,
     );
@@ -507,7 +460,6 @@ fn parse_animations_at(table: &Table, base: &str, errors: &mut Errors) -> Animat
         ("window_movement", &mut animations.window_movement),
         ("window_resize", &mut animations.window_resize),
         ("workspace_switch", &mut animations.workspace_switch),
-        ("overview", &mut animations.overview),
     ] {
         if let Some(animation) = ex::table(table, key, base, errors) {
             *target = parse_animation_override(&animation, &path_key(base, key), errors);

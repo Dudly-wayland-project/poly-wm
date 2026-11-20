@@ -608,10 +608,6 @@ fn event_text(event: &poly_ipc::Event) -> String {
         poly_ipc::Event::OutputAdded { output } => format!("output {:?} added", output.name),
         poly_ipc::Event::OutputRemoved { name } => format!("output {name:?} removed"),
         poly_ipc::Event::OutputChanged { output } => format!("output {:?} changed", output.name),
-        poly_ipc::Event::OverviewOpenedOrClosed { is_open } => match is_open {
-            true => "the overview opened".to_owned(),
-            false => "the overview closed".to_owned(),
-        },
         poly_ipc::Event::ConfigLoaded { failed } => match failed {
             true => "the configuration has errors; the previous one is still in effect".to_owned(),
             false => "the configuration was loaded".to_owned(),

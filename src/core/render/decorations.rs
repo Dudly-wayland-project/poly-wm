@@ -22,7 +22,7 @@ use smithay::backend::renderer::element::Id;
 use smithay::backend::renderer::gles::Uniform;
 use smithay::backend::renderer::gles::element::PixelShaderElement;
 use smithay::backend::renderer::utils::CommitCounter;
-use smithay::utils::{Logical, Point, Rectangle, Size};
+use smithay::utils::{Logical, Rectangle};
 use tracing::warn;
 
 use super::blur::{BlurElement, BlurOptions, BlurProgram, XrayBuffer};
@@ -52,7 +52,7 @@ pub struct DecorationInputs<'a> {
     /// Pointer position in window coordinates.
     pub cursor: [f32; 2],
     /// Clip the decorations to this rectangle (output-local logical), so a
-    /// window's shadow cannot paint over a neighbouring overview card.
+    /// window's shadow cannot paint over a neighbouring workspace card.
     pub clip: Option<Rectangle<i32, Logical>>,
     /// Blur region the client asked for (`ext-background-effect-v1`), in
     /// output-local logical coordinates.
@@ -85,13 +85,6 @@ fn card_clip(rect: Rectangle<i32, Logical>, clip: Option<Rectangle<i32, Logical>
     ];
 }
 
-/// Past this many rectangles a client blur region is drawn as its bounding box.
-///
-/// Every rectangle becomes a draw instance in the blur element, and normalising
-/// overlapping rectangles into disjoint ones can split them further. A region a
-/// client fragmented into hundreds of pieces is not worth that.
-const MAX_CLIENT_BLUR_REGIONS: usize = 16;
-
 /// What a window's backdrop has to cover.
 ///
 /// The three cases are distinct on purpose: a client that never touched
@@ -114,9 +107,14 @@ enum BlurArea {
 /// it out of surface space), so it is clipped to the drawn window and shifted
 /// by the window origin.
 ///
-/// The result is disjoint: the blur element draws one instance per damage
-/// rectangle, so two overlapping rectangles would composite the backdrop twice
-/// and darken the overlap wherever the window is translucent.
+/// The input is disjoint (`utils::region` produced it) and clipping keeps it
+/// that way: the blur element draws one instance per damage rectangle, so two
+/// overlapping rectangles would composite the backdrop twice and darken the
+/// overlap wherever the window is translucent.
+///
+/// Every rectangle is kept, however many there are. Clients approximate
+/// rounded panels with one-pixel strips; replacing those with their bounding
+/// box would blur the corners the client cut away.
 fn client_regions(inputs: &DecorationInputs<'_>) -> BlurArea {
     let Some(blur_region) = inputs.blur_region else {
         return BlurArea::Whole;
@@ -135,54 +133,7 @@ fn client_regions(inputs: &DecorationInputs<'_>) -> BlurArea {
     if clipped.is_empty() {
         return BlurArea::Nothing;
     }
-    if clipped.len() > MAX_CLIENT_BLUR_REGIONS {
-        clipped = bounding_box(&clipped).into_iter().collect();
-    }
-
-    let disjoint = disjoint_pieces(clipped);
-    if disjoint.is_empty() {
-        return BlurArea::Nothing;
-    }
-    return BlurArea::Regions(Rc::from(disjoint));
-}
-
-/// Express a list of rectangles as disjoint pieces.
-///
-/// The blur element draws one instance per damage rectangle, so two
-/// overlapping rectangles would composite the backdrop twice and darken the
-/// overlap wherever the surface is translucent. Past
-/// [`MAX_CLIENT_BLUR_REGIONS`] pieces the union is drawn as its bounding box.
-pub fn disjoint_pieces(rects: Vec<Rectangle<i32, Logical>>) -> Vec<Rectangle<i32, Logical>> {
-    // Peel every rectangle against the ones already accepted, so the union is
-    // expressed as disjoint pieces.
-    let mut disjoint: Vec<Rectangle<i32, Logical>> = Vec::with_capacity(rects.len());
-    for rect in rects {
-        let pieces = Rectangle::subtract_rects_many_in_place(vec![rect], disjoint.iter().copied());
-        disjoint.extend(pieces);
-    }
-    if disjoint.len() > MAX_CLIENT_BLUR_REGIONS {
-        return bounding_box(&disjoint).into_iter().collect();
-    }
-    return disjoint;
-}
-
-/// The smallest rectangle containing all of `rects`.
-fn bounding_box(rects: &[Rectangle<i32, Logical>]) -> Option<Rectangle<i32, Logical>> {
-    let first = *rects.first()?;
-    let mut min_x = first.loc.x;
-    let mut min_y = first.loc.y;
-    let mut max_x = first.loc.x + first.size.w;
-    let mut max_y = first.loc.y + first.size.h;
-    for rect in &rects[1..] {
-        min_x = min_x.min(rect.loc.x);
-        min_y = min_y.min(rect.loc.y);
-        max_x = max_x.max(rect.loc.x + rect.size.w);
-        max_y = max_y.max(rect.loc.y + rect.size.h);
-    }
-    return Some(Rectangle::new(
-        Point::from((min_x, min_y)),
-        Size::from((max_x - min_x, max_y - min_y)),
-    ));
+    return BlurArea::Regions(Rc::from(clipped));
 }
 
 /// The decorations of one window, front to back relative to each other.
@@ -669,37 +620,28 @@ mod tests {
         assert_eq!(client_regions(&inputs), BlurArea::Nothing);
     }
 
-    fn area(rects: &[Rectangle<i32, Logical>]) -> i64 {
-        return rects
-            .iter()
-            .map(|rect| return i64::from(rect.size.w) * i64::from(rect.size.h))
-            .sum();
-    }
-
     #[test]
-    fn overlapping_client_regions_are_split_so_nothing_is_painted_twice() {
+    fn many_client_strips_are_kept_instead_of_a_bounding_box() {
         let visuals = WindowVisuals::default();
-        // Two 100x100 squares overlapping in a 50x50 corner.
-        let region = [
-            Rectangle::new((100, 50).into(), (100, 100).into()),
-            Rectangle::new((150, 100).into(), (100, 100).into()),
-        ];
+        // A rounded shape as one-pixel strips: the corners must stay out.
+        let mut region = Vec::new();
+        for row in 0..40 {
+            let inset = if row < 20 { 20 - row } else { 0 };
+            region.push(Rectangle::new(
+                (100 + inset, 50 + row).into(),
+                (200 - inset * 2, 1).into(),
+            ));
+        }
         let inputs = inputs(
             Rectangle::new((100, 50).into(), (400, 300).into()),
             &visuals,
             Some(&region),
         );
-
         let regions = match client_regions(&inputs) {
             BlurArea::Regions(regions) => regions,
-            other => panic!("the union is not empty, got {other:?}"),
+            other => panic!("the strips lie inside the window, got {other:?}"),
         };
-        // Counting the union once is exactly what keeping the pieces disjoint
-        // means: 100*100 + 100*100 - 50*50.
-        assert_eq!(area(&regions), 17_500);
-        assert!(
-            regions.len() > 1,
-            "the overlap has to be split off, got {regions:?}"
-        );
+        assert_eq!(regions.len(), 40);
+        assert!(!regions.iter().any(|r| return r.contains((0, 0))));
     }
 }

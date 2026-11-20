@@ -126,7 +126,6 @@ pub fn do_action(state: &mut State, action: Action, button: Option<u32>) {
         Action::MoveWindowToWorkspace { index } => {
             crate::core::layout::LayoutManager::move_window_to_workspace(state, index);
         }
-        Action::ToggleOverview => crate::core::layout::LayoutManager::toggle_overview(state),
         Action::LayoutAction { name, args } => {
             crate::core::layout::LayoutManager::run_layout_action(state, &name, &args);
         }

@@ -7,8 +7,8 @@ void main() {
     vec3 coords_geo = input_to_geo * vec3(v_coords, 1.0);
 
     // Keep the window inside its workspace card: a floating window may stick
-    // out of the workspace, and during the overview that would paint over the
-    // gap or the neighbouring card.
+    // out of the workspace, and during a slide that would paint over the
+    // neighbouring workspace.
     if (coords_geo.x < poly_card_clip.x || coords_geo.y < poly_card_clip.y ||
             poly_card_clip.z < coords_geo.x || poly_card_clip.w < coords_geo.y) {
         discard;

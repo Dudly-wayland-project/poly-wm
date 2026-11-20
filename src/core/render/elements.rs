@@ -19,10 +19,8 @@ use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::texture::TextureRenderElement;
-use smithay::backend::renderer::element::utils::{CropRenderElement, RescaleRenderElement};
-use smithay::backend::renderer::element::{
-    Element, Id, Kind, NamespacedElement, RenderElement, UnderlyingStorage,
-};
+use smithay::backend::renderer::element::utils::CropRenderElement;
+use smithay::backend::renderer::element::{Element, Id, Kind, RenderElement, UnderlyingStorage};
 use smithay::backend::renderer::gles::element::PixelShaderElement;
 use smithay::backend::renderer::gles::{
     GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture, Uniform,
@@ -154,7 +152,7 @@ pub struct WindowClip {
     pub geometry: Rectangle<f64, Logical>,
     /// Corner radii in the same units as `geometry`.
     pub corner_radius: CornerRadius,
-    /// Scale applied to the window surfaces (the animation/overview rescale,
+    /// Scale applied to the window surfaces (the animation rescale,
     /// `1.0` when the window is drawn at its natural size).
     ///
     /// The surface elements are placed at their unscaled size, so the shader's
@@ -525,12 +523,6 @@ impl RenderElement<GlesRenderer> for ShaderElement {
     }
 }
 
-/// A Bottom/Background layer surface scaled into one workspace card and
-/// cropped to it, with the card index as the element-id namespace so several
-/// copies of the same surface can live on one frame.
-pub type CardLayerElement<R> =
-    NamespacedElement<CropRenderElement<RescaleRenderElement<WaylandSurfaceRenderElement<R>>>>;
-
 /// Everything Poly draws onto an output, front to back.
 ///
 /// Written by hand because the `render_elements!` macro cannot route a variant
@@ -543,9 +535,6 @@ pub type ClosingRenderElement = CropRenderElement<TextureRenderElement<GlesTextu
 pub enum OutputElements<R: PolyRenderer> {
     /// A plain surface: popups, layer surfaces, the lock screen.
     Surface(WaylandSurfaceRenderElement<R>),
-    /// A Bottom/Background layer surface scaled and cropped into one
-    /// workspace card of the overview.
-    Card(CardLayerElement<R>),
     /// A window surface, clipped and shaded.
     Window(WindowElement<R>),
     /// The software cursor.
@@ -569,7 +558,6 @@ impl<R: PolyRenderer> std::fmt::Debug for OutputElements<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
             Self::Surface(_) => "Surface",
-            Self::Card(_) => "Card",
             Self::Window(_) => "Window",
             Self::Cursor(_) => "Cursor",
             Self::Solid(_) => "Solid",
@@ -587,7 +575,6 @@ impl<R: PolyRenderer> Element for OutputElements<R> {
     fn id(&self) -> &Id {
         return match self {
             Self::Surface(element) => Element::id(element),
-            Self::Card(element) => Element::id(element),
             Self::Window(element) => Element::id(element),
             Self::Cursor(element) => Element::id(element),
             Self::Solid(element) => Element::id(element),
@@ -602,7 +589,6 @@ impl<R: PolyRenderer> Element for OutputElements<R> {
     fn current_commit(&self) -> CommitCounter {
         return match self {
             Self::Surface(element) => Element::current_commit(element),
-            Self::Card(element) => Element::current_commit(element),
             Self::Window(element) => Element::current_commit(element),
             Self::Cursor(element) => Element::current_commit(element),
             Self::Solid(element) => Element::current_commit(element),
@@ -617,7 +603,6 @@ impl<R: PolyRenderer> Element for OutputElements<R> {
     fn src(&self) -> Rectangle<f64, Buffer> {
         return match self {
             Self::Surface(element) => Element::src(element),
-            Self::Card(element) => Element::src(element),
             Self::Window(element) => Element::src(element),
             Self::Cursor(element) => Element::src(element),
             Self::Solid(element) => Element::src(element),
@@ -632,7 +617,6 @@ impl<R: PolyRenderer> Element for OutputElements<R> {
     fn transform(&self) -> Transform {
         return match self {
             Self::Surface(element) => Element::transform(element),
-            Self::Card(element) => Element::transform(element),
             Self::Window(element) => Element::transform(element),
             Self::Cursor(element) => Element::transform(element),
             Self::Solid(element) => Element::transform(element),
@@ -647,7 +631,6 @@ impl<R: PolyRenderer> Element for OutputElements<R> {
     fn geometry(&self, scale: Scale<f64>) -> Rectangle<i32, Physical> {
         return match self {
             Self::Surface(element) => Element::geometry(element, scale),
-            Self::Card(element) => Element::geometry(element, scale),
             Self::Window(element) => Element::geometry(element, scale),
             Self::Cursor(element) => Element::geometry(element, scale),
             Self::Solid(element) => Element::geometry(element, scale),
@@ -666,7 +649,6 @@ impl<R: PolyRenderer> Element for OutputElements<R> {
     ) -> DamageSet<i32, Physical> {
         return match self {
             Self::Surface(element) => element.damage_since(scale, commit),
-            Self::Card(element) => element.damage_since(scale, commit),
             Self::Window(element) => element.damage_since(scale, commit),
             Self::Cursor(element) => element.damage_since(scale, commit),
             Self::Solid(element) => element.damage_since(scale, commit),
@@ -681,7 +663,6 @@ impl<R: PolyRenderer> Element for OutputElements<R> {
     fn opaque_regions(&self, scale: Scale<f64>) -> OpaqueRegions<i32, Physical> {
         return match self {
             Self::Surface(element) => Element::opaque_regions(element, scale),
-            Self::Card(element) => Element::opaque_regions(element, scale),
             Self::Window(element) => Element::opaque_regions(element, scale),
             Self::Cursor(element) => Element::opaque_regions(element, scale),
             Self::Solid(element) => Element::opaque_regions(element, scale),
@@ -696,7 +677,6 @@ impl<R: PolyRenderer> Element for OutputElements<R> {
     fn alpha(&self) -> f32 {
         return match self {
             Self::Surface(element) => Element::alpha(element),
-            Self::Card(element) => Element::alpha(element),
             Self::Window(element) => Element::alpha(element),
             Self::Cursor(element) => Element::alpha(element),
             Self::Solid(element) => Element::alpha(element),
@@ -711,7 +691,6 @@ impl<R: PolyRenderer> Element for OutputElements<R> {
     fn kind(&self) -> Kind {
         return match self {
             Self::Surface(element) => Element::kind(element),
-            Self::Card(element) => Element::kind(element),
             Self::Window(element) => Element::kind(element),
             Self::Cursor(element) => Element::kind(element),
             Self::Solid(element) => Element::kind(element),
@@ -747,9 +726,6 @@ where
     ) -> Result<(), R::Error> {
         return match self {
             Self::Surface(element) => {
-                RenderElement::<R>::draw(element, frame, src, dst, damage, opaque_regions, cache)
-            }
-            Self::Card(element) => {
                 RenderElement::<R>::draw(element, frame, src, dst, damage, opaque_regions, cache)
             }
             Self::Window(element) => {
@@ -804,7 +780,6 @@ where
     fn underlying_storage(&self, renderer: &mut R) -> Option<UnderlyingStorage<'_>> {
         return match self {
             Self::Surface(element) => element.underlying_storage(renderer),
-            Self::Card(element) => element.underlying_storage(renderer),
             Self::Window(element) => element.underlying_storage(renderer),
             Self::Cursor(element) => element.underlying_storage(renderer),
             Self::Toast(element) => element.underlying_storage(renderer),

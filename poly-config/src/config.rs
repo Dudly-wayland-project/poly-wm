@@ -38,8 +38,6 @@ pub struct Config {
     pub outputs: Vec<(String, OutputConfig)>,
     /// Fullscreen behaviour.
     pub fullscreen: Fullscreen,
-    /// Appearance of the workspace overview.
-    pub overview: Overview,
     /// Where configuration and runtime problems are reported.
     pub errors: Errors,
     /// X11 clients through `xwayland-satellite`.
@@ -61,7 +59,6 @@ impl Default for Config {
             window_rules: Vec::new(),
             outputs: Vec::new(),
             fullscreen: Fullscreen::default(),
-            overview: Overview::default(),
             errors: Errors::default(),
             xwayland: Xwayland::default(),
         };
@@ -494,8 +491,6 @@ pub struct Animations {
     pub window_resize: AnimationOverride,
     /// Sliding between vertical workspaces.
     pub workspace_switch: AnimationOverride,
-    /// Opening or closing the workspace overview.
-    pub overview: AnimationOverride,
 }
 
 impl Default for Animations {
@@ -509,7 +504,6 @@ impl Default for Animations {
             window_movement: AnimationOverride::default(),
             window_resize: AnimationOverride::default(),
             workspace_switch: AnimationOverride::default(),
-            overview: AnimationOverride::default(),
         };
     }
 }
@@ -642,11 +636,6 @@ impl Animations {
     /// Sliding between workspaces.
     pub fn workspace_switch(&self) -> AnimationSpec {
         return self.resolve(self.workspace_switch, AnimationCurve::EaseOutCubic);
-    }
-
-    /// Opening or closing the overview.
-    pub fn overview(&self) -> AnimationSpec {
-        return self.resolve(self.overview, AnimationCurve::EaseOutCubic);
     }
 }
 
@@ -1120,41 +1109,6 @@ impl Default for Fullscreen {
     fn default() -> Self {
         return Self {
             cover_top_layer: true,
-        };
-    }
-}
-
-/// `overview = { … }`.
-///
-/// The defaults follow niri: cards shrink to half size, sit on an opaque
-/// `#262626` backdrop and cast a soft shadow. `zoom` is clamped to
-/// `0.0001 ..= 0.75` like niri, so the overview can never zoom a card up.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Overview {
-    /// Card scale at full overview (`1.0` is the plain output).
-    pub zoom: f64,
-    /// Color of the desktop behind the cards.
-    pub backdrop_color: Color,
-    /// Background color of a workspace card.
-    pub card_color: Color,
-    /// Shadow drawn behind every card. `blur` is the niri "softness".
-    pub shadow: Shadow,
-}
-
-impl Default for Overview {
-    fn default() -> Self {
-        return Self {
-            zoom: 0.5,
-            backdrop_color: Color::rgb(0x26, 0x26, 0x26),
-            card_color: Color::rgb(0x40, 0x40, 0x40),
-            shadow: Shadow {
-                enable: true,
-                blur: 40.0,
-                spread: 10.0,
-                offset_x: 0,
-                offset_y: 10,
-                color: Color::rgba(0, 0, 0, 0x50),
-            },
         };
     }
 }

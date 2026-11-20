@@ -133,8 +133,16 @@ fn send_initial_configure(state: &mut State, root: &WlSurface) {
         (unmapped.window.clone(), unmapped.window.toplevel().cloned())
     };
     if let Some(toplevel) = toplevel {
-        debug!("sending the initial configure");
+        // A tiled window learns its slot now, so its first buffer already has
+        // the right size and it maps straight into place.
+        let size = LayoutManager::initial_size(state, &window);
+        debug!("sending the initial configure with size {size:?}");
         apply_tiled_state(window_no_csd(state, &window), &toplevel);
+        if let Some(size) = size {
+            toplevel.with_pending_state(|pending| {
+                pending.size = Some(size);
+            });
+        }
         toplevel.send_configure();
     }
 }
@@ -455,7 +463,7 @@ pub(crate) fn take_closing_snapshot(
     // `snapshot_window` bakes in workspace-local coordinates (it shifts the
     // window rect to the output before `push_window` subtracts it again).
     // Keep the snapshot rect local too, matching `window_rect`; `push_closing`
-    // applies the workspace/overview projection to both.
+    // applies the workspace projection to both.
     let snapshot_rect = snapshot.bounds;
     // The animation clock is set in `start_closing`, i.e. after this bake and
     // after the window is actually removed. Baking can take a while (notably

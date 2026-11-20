@@ -219,7 +219,7 @@ src/main.rs, cli.rs
   the same `Core`; behavior belongs in `Core` unless it is truly backend-specific.
 - `src/core/handlers/` implements Wayland protocol handlers; `handlers.rs`
   registers them with `delegate_dispatch2!(State)`.
-- `src/core/layout/` owns window placement, transactions, overview and the
+- `src/core/layout/` owns window placement, transactions, workspaces and the
   column fallback. JavaScript layouts return rectangles through
   `LayoutPrograms`; they do not mutate state directly.
 - `src/core/render/` builds and draws the scene: window visuals, decorations,

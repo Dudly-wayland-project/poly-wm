@@ -25,6 +25,6 @@ pub use protocol::{
 };
 pub use socket::{IpcError, SOCKET_ENV, Socket, socket_path};
 pub use state::{
-    ConfigState, EventStreamState, EventStreamStatePart, OutputsState, OverviewState, WindowsState,
+    ConfigState, EventStreamState, EventStreamStatePart, OutputsState, WindowsState,
     WorkspacesState,
 };

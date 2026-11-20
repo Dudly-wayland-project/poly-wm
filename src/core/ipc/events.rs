@@ -180,7 +180,6 @@ pub fn resync(state: &mut State) {
     let workspaces = workspaces(state);
     let windows = windows(state);
     let outputs = outputs(state);
-    let overview = state.core.layout.overview_open();
     let events = &mut state.core.ipc.events;
 
     events.workspaces.workspaces = workspaces;
@@ -189,7 +188,6 @@ pub fn resync(state: &mut State) {
         .into_iter()
         .map(|output| return (output.name.clone(), output))
         .collect();
-    events.overview.is_open = overview;
 }
 
 /// The events that describe the difference between the live state and the
@@ -244,12 +242,6 @@ pub fn diff(state: &mut State) -> Vec<Event> {
         .into_iter()
         .map(|output| return (output.name.clone(), output))
         .collect();
-
-    let overview = state.core.layout.overview_open();
-    if state.core.ipc.events.overview.is_open != overview {
-        state.core.ipc.events.overview.is_open = overview;
-        events.push(Event::OverviewOpenedOrClosed { is_open: overview });
-    }
 
     return events;
 }

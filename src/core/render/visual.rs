@@ -243,40 +243,9 @@ impl WindowVisuals {
         };
     }
 
-    /// The visuals of the same window drawn at `zoom`.
-    ///
-    /// The overview rescales a whole workspace, so radius, border width, shadow
-    /// blur and shadow offset have to shrink with it or the thumbnail would
-    /// look bolder than the real window. Blur is dropped: an offscreen blur
-    /// pass per thumbnail is unusable on a software renderer and niri does not
-    /// blur the overview either.
-    pub fn scaled(&self, zoom: f64) -> WindowVisuals {
-        let factor = zoom.clamp(0.0001, 1.0) as f32;
-        let mut visuals = self.clone();
-        visuals.radius = CornerRadius {
-            top_left: self.radius.top_left * factor,
-            top_right: self.radius.top_right * factor,
-            bottom_right: self.radius.bottom_right * factor,
-            bottom_left: self.radius.bottom_left * factor,
-        };
-        visuals.border_width = self.border_width * factor;
-        visuals.shadow = self.shadow.map(|shadow| {
-            return ShadowParams {
-                sigma: shadow.sigma * factor,
-                spread: shadow.spread * factor,
-                offset_x: shadow.offset_x * factor,
-                offset_y: shadow.offset_y * factor,
-                color: shadow.color,
-            };
-        });
-        visuals.blur = None;
-        return visuals;
-    }
-
     /// The visuals of a window drawn at an animation scale.
     ///
-    /// Unlike [`WindowVisuals::scaled`] this keeps the blur: an opening window
-    /// is still a real window composited over the wallpaper, so dropping its
+    /// This keeps the blur: an opening window is still a real window composited over the wallpaper, so dropping its
     /// backdrop would make blur pop in at the end of the animation. The blur
     /// sampling offset shrinks with the window so the softened region stays
     /// proportional.

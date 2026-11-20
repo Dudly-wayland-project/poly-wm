@@ -27,15 +27,14 @@ use smithay::backend::input::{
 };
 use smithay::backend::libinput::LibinputInputBackend;
 use smithay::input::keyboard::{FilterResult, Keysym, ModifiersState};
-use smithay::input::pointer::RelativeMotionEvent;
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
+use smithay::input::pointer::{CursorIcon, CursorImageStatus, PointerHandle, RelativeMotionEvent};
 use smithay::input::tablet::{self, TabletDescriptor, TabletSeatTrait};
 use smithay::input::touch::{DownEvent, UpEvent};
 use smithay::reexports::input as libinput;
 use smithay::utils::{Coordinate as _, Logical, Point, SERIAL_COUNTER, Serial};
 use smithay::wayland::seat::WaylandFocus as _;
 use smithay::wayland::shell::wlr_layer::{KeyboardInteractivity, Layer};
-use std::time::Instant;
 use tracing::{debug, trace, warn};
 
 use self::move_grab::MoveGrab;
@@ -274,24 +273,12 @@ fn on_keyboard<B: InputBackend>(state: &mut State, event: &B::KeyboardKeyEvent) 
                 return FilterResult::Forward;
             };
 
-            // The overview owns Escape while it is visible: it closes before
-            // the grab cancellation or any user binding can see the key.
-            if pressed && raw == Keysym::Escape && LayoutManager::close_overview(state) {
-                return FilterResult::Intercept(());
-            }
-
             if pressed && raw == Keysym::Escape && cancel_pointer_grab(state, serial, time) {
                 return FilterResult::Intercept(());
             }
 
             let bind = find_active_bind(state, Trigger::Keysym(raw), *modifiers).cloned();
             let Some(bind) = bind else {
-                // niri's hardcoded overview keys: with no configured binding
-                // matching, the unmodified arrows page through the overview and
-                // Return closes it. Configured bindings always win.
-                if pressed && overview_hardcoded_key(state, raw, *modifiers) {
-                    return FilterResult::Intercept(());
-                }
                 return FilterResult::Forward;
             };
 
@@ -304,41 +291,6 @@ fn on_keyboard<B: InputBackend>(state: &mut State, event: &B::KeyboardKeyEvent) 
             return FilterResult::Intercept(());
         },
     );
-}
-
-/// Keys the overview reserves while it is visible (niri's
-/// `hardcoded_overview_bind`).
-///
-/// They only apply when no configured binding matched and no modifier is held,
-/// so a user binding on `Up` still works. Up/Down move the active workspace
-/// (the cards slide), Left/Right move the focus inside the active workspace.
-fn overview_hardcoded_key(state: &mut State, raw: Keysym, modifiers: ModifiersState) -> bool {
-    if !modifiers_from_state(modifiers).is_empty() {
-        return false;
-    }
-    if !state.core.layout.overview_visible(Instant::now()) {
-        return false;
-    }
-    return match raw {
-        Keysym::Return | Keysym::Escape => LayoutManager::close_overview(state),
-        Keysym::Up => {
-            LayoutManager::focus_workspace_relative(state, -1);
-            true
-        }
-        Keysym::Down => {
-            LayoutManager::focus_workspace_relative(state, 1);
-            true
-        }
-        Keysym::Left => {
-            LayoutManager::focus_relative(state, -1);
-            true
-        }
-        Keysym::Right => {
-            LayoutManager::focus_relative(state, 1);
-            true
-        }
-        _ => false,
-    };
 }
 
 fn on_pointer_motion<B: InputBackend>(state: &mut State, event: &B::PointerMotionEvent) {
@@ -371,10 +323,31 @@ fn on_pointer_motion<B: InputBackend>(state: &mut State, event: &B::PointerMotio
         },
     );
     pointer.frame(state);
+    reset_cursor_off_surface(state, &pointer);
 
     // We draw the cursor ourselves, so a move repaints every output: the old
     // position has to be erased and the new one drawn.
     state.core.queue_redraw_all();
+}
+
+/// Show the default arrow once the pointer is over no surface at all.
+///
+/// A client's cursor (a link's hand, an entry's I-beam, its own cursor
+/// surface) only stays meaningful while that client has pointer focus. Smithay
+/// does not reset it on leave, so without this the desktop and the gaps would
+/// keep whatever shape the last client set. Grabs set their own cursor and
+/// keep it.
+fn reset_cursor_off_surface(state: &mut State, pointer: &PointerHandle<State>) {
+    if pointer.is_grabbed() || pointer.current_focus().is_some() {
+        return;
+    }
+    let default = matches!(
+        state.core.cursor_status,
+        CursorImageStatus::Named(CursorIcon::Default)
+    );
+    if !default {
+        state.core.cursor_status = CursorImageStatus::default_named();
+    }
 }
 
 fn on_pointer_motion_absolute<B: InputBackend>(
@@ -402,6 +375,7 @@ fn on_pointer_motion_absolute<B: InputBackend>(
         },
     );
     pointer.frame(state);
+    reset_cursor_off_surface(state, &pointer);
     state.core.queue_redraw_all();
 }
 
@@ -444,17 +418,6 @@ fn on_pointer_button<B: InputBackend>(state: &mut State, event: &B::PointerButto
     // ends here — the release never reaches the grab itself.
     if !pressed && state.core.suppressed_buttons.remove(&button_code) {
         end_drag_grab(state, serial, time);
-        pointer.frame(state);
-        return;
-    }
-
-    // The overview consumes clicks: a left click picks a card (and the window
-    // in it). Other buttons and clicks on the backdrop are swallowed without
-    // closing it — niri keeps the overview open there too.
-    if state.core.layout.overview_visible(Instant::now()) {
-        if pressed && event.button() == Some(MouseButton::Left) {
-            LayoutManager::overview_click(state, pointer.current_location());
-        }
         pointer.frame(state);
         return;
     }
@@ -522,37 +485,6 @@ fn on_pointer_axis<B: InputBackend>(state: &mut State, event: &B::PointerAxisEve
         // `TouchpadScroll*` binding the event belongs to the client.
     }
 
-    // The overview pages through workspaces with the wheel instead of
-    // scrolling a client. Ticks are accumulated so a
-    // touchpad (which has no `v120` units) does not page on every tiny event.
-    if state.core.layout.overview_visible(Instant::now()) {
-        let vertical = event.amount_v120(Axis::Vertical).unwrap_or_else(|| {
-            return event
-                .amount(Axis::Vertical)
-                .unwrap_or(0.0)
-                .clamp(-120.0, 120.0);
-        });
-        let ticks = state.core.scroll_tracker_vertical.accumulate(vertical);
-        if ticks != 0 {
-            // Page the workspace stack under the pointer, and only between
-            // workspaces that already exist: scrolling at the bottom must not
-            // append a new empty one (unlike the keyboard's
-            // `focus-workspace-down`).
-            let output = state
-                .core
-                .output_at(pointer.current_location())
-                .or_else(|| return LayoutManager::active_output(state));
-            if let Some(output) = output {
-                LayoutManager::focus_workspace_relative_existing(
-                    state,
-                    &output,
-                    ticks.signum() as isize,
-                );
-            }
-        }
-        pointer.frame(state);
-        return;
-    }
     state.core.scroll_tracker_horizontal.reset();
     state.core.scroll_tracker_vertical.reset();
 
@@ -617,11 +549,6 @@ fn on_touch_down<B: InputBackend>(state: &mut State, event: &B::TouchDownEvent) 
     };
 
     let serial = SERIAL_COUNTER.next_serial();
-    // The overview handles the touch itself; the seat is not involved.
-    if state.core.layout.overview_visible(Instant::now()) {
-        LayoutManager::overview_click(state, location);
-        return;
-    }
     focus_under_location(state, location, serial);
 
     let under = state.core.surface_under(location);
@@ -645,10 +572,6 @@ fn on_touch_motion<B: InputBackend>(state: &mut State, event: &B::TouchMotionEve
         return;
     };
 
-    if state.core.layout.overview_visible(Instant::now()) {
-        return;
-    }
-
     let under = state.core.surface_under(location);
     touch.motion(
         state,
@@ -665,9 +588,6 @@ fn on_touch_up<B: InputBackend>(state: &mut State, event: &B::TouchUpEvent) {
     let Some(touch) = state.core.seat.get_touch() else {
         return;
     };
-    // A down swallowed by the overview never reached the seat, and Smithay
-    // ignores an up for a slot it does not track. A touch that started before
-    // the overview opened is still lifted here.
     let serial = SERIAL_COUNTER.next_serial();
     touch.up(
         state,

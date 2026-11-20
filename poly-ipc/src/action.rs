@@ -120,8 +120,6 @@ pub enum Action {
     MoveWorkspaceUp,
     /// Swap the active workspace with the one below it.
     MoveWorkspaceDown,
-    /// Show or hide the workspace overview.
-    ToggleOverview,
 
     /// Invoke an action declared by the active workspace's JavaScript layout.
     ///
@@ -175,7 +173,6 @@ impl Action {
             Action::MoveWindowToWorkspace { .. } => "move-window-to-workspace",
             Action::MoveWorkspaceUp => "move-workspace-up",
             Action::MoveWorkspaceDown => "move-workspace-down",
-            Action::ToggleOverview => "toggle-overview",
             Action::LayoutAction { .. } => "layout-action",
         };
     }
@@ -308,7 +305,6 @@ const ARGLESS_ACTIONS: &[Action] = &[
     Action::MoveWindowToWorkspaceDown,
     Action::MoveWorkspaceUp,
     Action::MoveWorkspaceDown,
-    Action::ToggleOverview,
 ];
 
 /// Exactly one argument, or an error hinting at the right spelling.
@@ -504,10 +500,6 @@ mod tests {
         assert_eq!(
             "move-workspace-up".parse::<Action>().unwrap(),
             Action::MoveWorkspaceUp
-        );
-        assert_eq!(
-            "toggle-overview".parse::<Action>().unwrap(),
-            Action::ToggleOverview
         );
         let err = "focus-workspace".parse::<Action>().unwrap_err();
         assert!(err.hint.is_some(), "focus-workspace needs an index");
