@@ -23,6 +23,15 @@ use crate::backend::RenderResult;
 /// that an old hitch stops skewing the numbers.
 const FRAME_HISTORY: usize = 128;
 
+/// A gap longer than this is an idle period, not a dropped frame.
+///
+/// The compositor renders on demand, so a desktop that nobody touches produces
+/// no frames at all; the first frame after that has a gap measured in seconds.
+/// Counting it as late would make every interaction look like a hitch. Half a
+/// second is long enough to still catch a genuine stall (thirty frames at 60 Hz)
+/// and short enough that a real pause is never mistaken for one.
+const IDLE_GAP: Duration = Duration::from_millis(500);
+
 /// Per-output frame statistics.
 #[derive(Debug, Clone)]
 pub struct OutputMetrics {
@@ -89,9 +98,18 @@ impl OutputMetrics {
             RenderResult::Submitted => {
                 // A frame that took longer than a slot and a half since the last
                 // one missed its VBlank, which is what stutter looks like.
+                //
+                // An idle period is not stutter. This compositor only renders
+                // when something changed, so coming back from two seconds of
+                // nothing is a gap of two seconds and would be counted here on
+                // every single interaction — which is how a healthy compositor
+                // ends up reporting a quarter of its frames as late. A gap longer
+                // than [`IDLE_GAP`] is a period with no frames to drop, so it is
+                // not counted at all.
                 let gap = self
                     .last_frame_at
-                    .map(|last| return now.saturating_duration_since(last));
+                    .map(|last| return now.saturating_duration_since(last))
+                    .filter(|gap| return *gap <= IDLE_GAP);
                 if gap.is_some_and(|gap| return gap > frame_interval.mul_f64(1.5)) {
                     self.frames_late += 1;
                 }
@@ -228,6 +246,54 @@ mod tests {
 
     fn interval() -> Duration {
         return Duration::from_micros(16_667);
+    }
+
+    #[test]
+    fn coming_back_from_idle_is_not_a_dropped_frame() {
+        // The compositor renders on demand, so an untouched desktop produces no
+        // frames. The first frame after a pause has a gap of seconds, and
+        // counting it as late made a healthy session report a quarter of its
+        // frames as dropped.
+        let start = Instant::now();
+        let mut metrics = OutputMetrics::default();
+        metrics.record(
+            RenderResult::Submitted,
+            Duration::from_micros(500),
+            start,
+            interval(),
+        );
+        metrics.record(
+            RenderResult::Submitted,
+            Duration::from_micros(500),
+            start + Duration::from_secs(3),
+            interval(),
+        );
+        assert_eq!(metrics.frames_submitted, 2);
+        assert_eq!(
+            metrics.frames_late, 0,
+            "three seconds of nothing is an idle period, not a missed VBlank"
+        );
+    }
+
+    #[test]
+    fn a_stall_inside_the_idle_window_is_still_late() {
+        // The other side of the same rule: a genuine stall short enough to be a
+        // stall rather than a pause must still be counted.
+        let start = Instant::now();
+        let mut metrics = OutputMetrics::default();
+        metrics.record(
+            RenderResult::Submitted,
+            Duration::from_micros(500),
+            start,
+            interval(),
+        );
+        metrics.record(
+            RenderResult::Submitted,
+            Duration::from_micros(500),
+            start + IDLE_GAP - Duration::from_millis(1),
+            interval(),
+        );
+        assert_eq!(metrics.frames_late, 1);
     }
 
     #[test]

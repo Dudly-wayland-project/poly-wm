@@ -638,19 +638,34 @@ impl Udev {
                     .get(&crtc)
                     .and_then(|compositor| return compositor.lock().ok())
                     .is_some_and(|mut compositor| {
-                        if !matches!(
-                            compositor.vrr_supported(connector.handle()),
-                            Ok(VrrSupport::Supported)
-                        ) {
-                            return false;
-                        }
-                        match compositor.use_vrr(true) {
-                            Ok(()) => {
-                                info!("variable refresh rate enabled on {output_name}");
-                                true
+                        // Every outcome is reported. Silence here means "VRR is
+                        // not on and nobody can tell why", which is exactly the
+                        // question a user checking their monitor asks.
+                        match compositor.vrr_supported(connector.handle()) {
+                            Ok(VrrSupport::Supported) => match compositor.use_vrr(true) {
+                                Ok(()) => {
+                                    info!("variable refresh rate enabled on {output_name}");
+                                    true
+                                }
+                                Err(err) => {
+                                    info!("VRR is supported by {output_name} but enabling it failed: {err:?}");
+                                    false
+                                }
+                            },
+                            Ok(VrrSupport::RequiresModeset) => {
+                                info!(
+                                    "VRR on {output_name} would need a modeset; leaving it off"
+                                );
+                                false
+                            }
+                            Ok(VrrSupport::NotSupported) => {
+                                info!(
+                                    "VRR is not supported on {output_name} (connector or CRTC has no VRR property)"
+                                );
+                                false
                             }
                             Err(err) => {
-                                debug!("could not enable VRR on {output_name}: {err:?}");
+                                info!("could not query VRR support of {output_name}: {err:?}");
                                 false
                             }
                         }
