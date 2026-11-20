@@ -124,9 +124,30 @@ pub struct FrameClock {
     last_presentation: Option<Instant>,
     /// The output's refresh interval, once it has a mode.
     refresh_interval: Option<Duration>,
+    /// Whether the output is running with variable refresh rate.
+    ///
+    /// Under VRR the panel presents when a frame is ready instead of on a fixed
+    /// grid, so there is no interval to snap to. Sampling animations on the
+    /// nominal refresh grid would then be *wrong*: it would advance a 48 Hz
+    /// presentation by 1/60 s of animation per frame, and an animation would
+    /// drift away from the frames it is drawn on. `next_presentation_time`
+    /// therefore returns "now" while this is set.
+    vrr: bool,
 }
 
 impl FrameClock {
+    /// Turn variable refresh rate on or off.
+    ///
+    /// A change invalidates the grid: the VBlanks recorded under the old mode
+    /// say nothing about when the next frame will be on screen.
+    pub fn set_vrr(&mut self, vrr: bool) {
+        if self.vrr == vrr {
+            return;
+        }
+        self.vrr = vrr;
+        self.last_presentation = None;
+    }
+
     /// Set the refresh interval; a mode change invalidates the VBlank grid.
     pub fn set_refresh_interval(&mut self, interval: Option<Duration>) {
         if self.refresh_interval == interval {
@@ -146,6 +167,11 @@ impl FrameClock {
     /// Without a refresh interval or a presentation yet there is no grid to
     /// snap to; the frame time is simply `now`.
     pub fn next_presentation_time(&self, now: Instant) -> Instant {
+        if self.vrr {
+            // VRR has no grid to snap to: a frame is presented when it is ready,
+            // so the next presentation is now.
+            return now;
+        }
         let Some(interval) = self
             .refresh_interval
             .filter(|value| return !value.is_zero())
@@ -420,5 +446,60 @@ mod tests {
         assert_eq!(clock.next_presentation_time(start), start);
         clock.set_refresh_interval(None);
         assert_eq!(clock.next_presentation_time(start), start);
+    }
+
+    #[test]
+    fn vrr_has_no_grid_to_snap_to() {
+        let mut clock = FrameClock::default();
+        let start = Instant::now();
+        let interval = Duration::from_millis(10);
+        clock.set_refresh_interval(Some(interval));
+        clock.presented(start);
+        // On a fixed grid the next frame lands on the next VBlank.
+        assert_eq!(
+            clock.next_presentation_time(start + Duration::from_millis(1)),
+            start + interval
+        );
+
+        // Under VRR the panel presents when the frame is ready, so the next
+        // presentation is simply now. Snapping would advance the animation by a
+        // nominal 1/100 s even though the frame went out immediately.
+        clock.set_vrr(true);
+        assert_eq!(
+            clock.next_presentation_time(start + Duration::from_millis(1)),
+            start + Duration::from_millis(1)
+        );
+        assert_eq!(
+            clock.next_presentation_time(start + Duration::from_millis(7)),
+            start + Duration::from_millis(7)
+        );
+    }
+
+    #[test]
+    fn leaving_vrr_restores_the_grid() {
+        let mut clock = FrameClock::default();
+        let start = Instant::now();
+        let interval = Duration::from_millis(10);
+        clock.set_refresh_interval(Some(interval));
+        clock.set_vrr(true);
+        clock.presented(start);
+        assert_eq!(
+            clock.next_presentation_time(start + Duration::from_millis(1)),
+            start + Duration::from_millis(1)
+        );
+
+        // The VBlanks recorded under VRR say nothing about the fixed grid that
+        // comes back, so turning it off drops the history; the first frame after
+        // the change is sampled at its own time.
+        clock.set_vrr(false);
+        assert_eq!(
+            clock.next_presentation_time(start + Duration::from_millis(3)),
+            start + Duration::from_millis(3)
+        );
+        clock.presented(start + Duration::from_millis(4));
+        assert_eq!(
+            clock.next_presentation_time(start + Duration::from_millis(5)),
+            start + Duration::from_millis(14)
+        );
     }
 }

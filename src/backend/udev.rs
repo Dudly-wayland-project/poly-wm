@@ -22,7 +22,7 @@ use smithay::backend::drm::compositor::{FrameFlags, PrimaryPlaneElement};
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements};
 use smithay::backend::drm::{
-    DrmDevice, DrmDeviceFd, DrmEvent, DrmEventMetadata, DrmEventTime, DrmNode,
+    DrmDevice, DrmDeviceFd, DrmEvent, DrmEventMetadata, DrmEventTime, DrmNode, VrrSupport,
 };
 use smithay::backend::egl::context::ContextPriority;
 use smithay::backend::egl::{EGLDevice, EGLDisplay};
@@ -168,6 +168,11 @@ struct OutputDevice {
     /// The connector's modes, kept so a runtime mode change can find the DRM
     /// mode that matches a Wayland one again.
     modes: Vec<smithay::reexports::drm::control::Mode>,
+    /// Whether this output is running with variable refresh rate.
+    ///
+    /// Kept here because the per-frame plane flags depend on it: under VRR a
+    /// cursor-only update should not force a presented frame.
+    vrr: bool,
 }
 
 impl Drop for OutputDevice {
@@ -606,10 +611,18 @@ impl Udev {
             }
         };
 
-        let drm_output = match device
-            .manager
-            .lock()
-            .initialize_output::<_, OutputElements<UdevRenderer<'_>>>(
+        // VRR has to be turned on while the manager is locked, because the flag
+        // lives on the `DrmCompositor`, which owns the CRTC's VRR property. Doing
+        // it in the same lock as the output's creation keeps the output from ever
+        // presenting a frame with VRR on and a fixed-grid frame clock, or the
+        // other way round.
+        //
+        // `RequiresModeset` counts as "not available": enabling it would blank the
+        // output right as it comes up, which is a poor trade for a smoothness
+        // feature the session works without.
+        let (drm_output, vrr) = {
+            let mut manager = device.manager.lock();
+            let drm_output = manager.initialize_output::<_, OutputElements<UdevRenderer<'_>>>(
                 crtc,
                 drm_mode,
                 &[connector.handle()],
@@ -617,7 +630,33 @@ impl Udev {
                 planes,
                 &mut renderer,
                 &DrmOutputRenderElements::default(),
-            ) {
+            );
+            let vrr = drm_output.is_ok()
+                && manager
+                    .compositors()
+                    .get(&crtc)
+                    .and_then(|compositor| return compositor.lock().ok())
+                    .is_some_and(|mut compositor| {
+                        if !matches!(
+                            compositor.vrr_supported(connector.handle()),
+                            Ok(VrrSupport::Supported)
+                        ) {
+                            return false;
+                        }
+                        match compositor.use_vrr(true) {
+                            Ok(()) => {
+                                info!("variable refresh rate enabled on {output_name}");
+                                true
+                            }
+                            Err(err) => {
+                                debug!("could not enable VRR on {output_name}: {err:?}");
+                                false
+                            }
+                        }
+                    });
+            (drm_output, vrr)
+        };
+        let drm_output = match drm_output {
             Ok(drm_output) => drm_output,
             Err(err) => {
                 warn!("error initializing output {output_name}: {err}");
@@ -640,12 +679,18 @@ impl Udev {
             wl_mode.refresh as f64 / 1000.0
         );
 
+        // The frame clock is the only other thing that has to know: under VRR the
+        // panel presents when a frame is ready, so animations must not be sampled
+        // on the nominal refresh grid (`FrameClock::set_vrr`).
+        core.output_state(&output).frame_clock.set_vrr(vrr);
+
         device.outputs.insert(
             crtc,
             OutputDevice {
                 output: output.clone(),
                 drm_output,
                 modes: connector.modes().to_vec(),
+                vrr,
             },
         );
         core.queue_redraw(&output);
@@ -781,11 +826,25 @@ impl Udev {
             // pushed first, i.e. it is already on top of everything, which is
             // the only placement the plane can express; whether it fits and
             // which plane to use is the DRM compositor's call.
-            if matches!(elements.first(), Some(render::OutputElements::Cursor(_))) {
+            let cursor_plane_possible =
+                matches!(elements.first(), Some(render::OutputElements::Cursor(_)));
+            if cursor_plane_possible {
                 frame_flags.insert(FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT);
             }
             if core.config.general.enable_overlay_planes {
                 frame_flags.insert(FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT);
+            }
+            // Under VRR a cursor-only update must not take a presentation slot:
+            // the panel would refresh to show the pointer move, the refresh rate
+            // would sit high while the desktop is idle, and the whole point of
+            // VRR — sitting low when nothing changes — would be lost. The flag
+            // makes the compositor skip drawing a frame whose only damage is the
+            // cursor and move the pointer on the cursor plane instead.
+            //
+            // Only with a cursor plane: without one the pointer is part of the
+            // composited frame, so skipping the frame would simply freeze it.
+            if output_device.vrr && cursor_plane_possible {
+                frame_flags.insert(FrameFlags::SKIP_CURSOR_ONLY_UPDATES);
             }
             match output_device.drm_output.render_frame(
                 &mut renderer,

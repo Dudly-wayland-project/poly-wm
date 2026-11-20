@@ -200,6 +200,25 @@ A few consequences worth knowing:
 - Screenshot and screencast frames use the same clear colour, so a capture of a
   fullscreen window shows the same black background the output shows.
 
+### Variable refresh rate
+
+On the native backend VRR is enabled automatically when the connector and CRTC
+report support for it, so there is nothing to configure. Two consequences:
+
+- Animations are no longer sampled on the nominal refresh grid. Under VRR a frame
+  is presented when it is ready rather than on a fixed VBlank, so a frame's
+  animation time is its own presentation time; sampling a fixed grid would make
+  an animation run at the wrong speed whenever the panel is not at its nominal
+  rate.
+- A frame whose only change is the pointer is skipped, so moving the mouse over
+  an idle desktop does not hold the refresh rate up. This needs a usable cursor
+  plane; without one the pointer is part of the composited frame and the frame
+  has to be drawn.
+
+Outputs whose VRR support would require a modeset are left at a fixed rate:
+blanking the output on every plug-in is a worse trade than the missing
+smoothness.
+
 ### `general.animations`
 
 Animations are enabled by default. `duration` is the fallback length in
