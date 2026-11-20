@@ -34,7 +34,7 @@ use smithay::wayland::compositor::{
     add_pre_commit_hook, remove_pre_commit_hook, with_states,
 };
 use smithay::wayland::seat::WaylandFocus as _;
-use smithay::wayland::shell::xdg::SurfaceCachedState;
+use smithay::wayland::shell::xdg::{SurfaceCachedState, XdgToplevelSurfaceData};
 use tracing::{debug, trace, warn};
 
 use crate::core::focus::{set_window_focus, update_keyboard_focus};
@@ -3964,11 +3964,15 @@ fn on_pre_commit(state: &mut State, surface: &WlSurface) {
     let Some(pending) = &managed.pending else {
         return;
     };
-    let Some(toplevel) = managed.window.toplevel() else {
-        return;
-    };
-    let acked = toplevel.with_cached_state(|state| {
-        return state
+    // The pre-commit hook runs before this commit is applied, so the cached
+    // toplevel state still holds the previous commit's ack. The role data has
+    // the configure acked for *this* commit (niri reads it the same way).
+    // Reading the cached state made a client that acks and commits once (GTK3)
+    // miss its transaction and wait for the deadline.
+    let acked = with_states(surface, |states| {
+        let data = states.data_map.get::<XdgToplevelSurfaceData>()?;
+        let data = data.lock().unwrap_or_else(|err| return err.into_inner());
+        return data
             .last_acked
             .as_ref()
             .map(|configure| return configure.serial);
