@@ -18,6 +18,7 @@ pub mod handlers;
 pub mod input;
 pub mod ipc;
 pub mod layout;
+pub mod metrics;
 pub mod notify;
 pub mod output;
 pub mod popups;
@@ -399,6 +400,9 @@ pub struct Core {
     /// before taking its snapshot), and it is cheap to recompute, so it is
     /// compared on lookup instead of being part of the key.
     pub capture_elements_background: HashMap<(Output, bool), [f32; 4]>,
+
+    /// Frame and capture counters, for the `metrics` IPC request.
+    pub metrics: crate::core::metrics::Metrics,
 }
 
 /// The cached drag-and-drop indicator: a translucent rounded slot and its
@@ -717,6 +721,7 @@ impl Core {
             config_generation: 0,
             capture_elements: HashMap::new(),
             capture_elements_background: HashMap::new(),
+            metrics: crate::core::metrics::Metrics::default(),
         });
     }
 

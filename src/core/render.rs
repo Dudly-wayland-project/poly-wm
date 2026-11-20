@@ -1700,8 +1700,130 @@ pub fn capture_output(
     // `State` for exactly this reason (`handlers/image_copy_capture.rs`).
     let (background, elements) = capture_elements(core, renderer, output, draw_cursor);
 
-    let session = capture.session(key, renderer, size, scale.into())?;
-    return session.capture_frame(renderer, &elements, background, buffer);
+    let started = Instant::now();
+    let outcome = {
+        // A dmabuf frame is drawn straight into the client's own buffer. There is
+        // nothing to read back, nothing to copy and nothing to remember: the
+        // renderer binds the dmabuf as a framebuffer and composites the scene
+        // into it, which is the whole point of advertising dmabuf in the
+        // constraints.
+        if let Ok(dmabuf) = smithay::wayland::dmabuf::get_dmabuf(buffer) {
+            // The buffer's data is shared (`Dmabuf` is an `Arc`), and the
+            // renderer needs it mutably to bind it, so the frame works on its
+            // own handle.
+            capture_into_dmabuf(renderer, &elements, background, &mut dmabuf.clone(), scale)
+        } else {
+            let session = capture.session(key, renderer, size, scale.into())?;
+            session.capture_frame(renderer, &elements, background, buffer)
+        }
+    };
+    // Every frame is counted, including the ones that failed: a client whose
+    // captures keep erroring is exactly what these numbers are for.
+    let elapsed = started.elapsed();
+    let bytes = match &outcome {
+        Ok(CaptureOutcome::Full(size)) | Ok(CaptureOutcome::Dmabuf(size)) => {
+            u64::try_from(size.w.max(0)).unwrap_or(0)
+                * u64::try_from(size.h.max(0)).unwrap_or(0)
+                * 4
+        }
+        // A damage readback copies only what changed; the regions are known to
+        // the session, which reports the plan in its own trace line.
+        Ok(CaptureOutcome::Damage(regions)) => regions
+            .iter()
+            .map(|region| {
+                return u64::try_from(region.size.w.max(0)).unwrap_or(0)
+                    * u64::try_from(region.size.h.max(0)).unwrap_or(0)
+                    * 4;
+            })
+            .sum(),
+        Ok(CaptureOutcome::Unchanged) | Ok(CaptureOutcome::Deferred) | Err(_) => 0,
+    };
+    // A dmabuf frame copies nothing, so its bytes are not readback bytes.
+    let counted_bytes = match &outcome {
+        Ok(CaptureOutcome::Dmabuf(_)) => 0,
+        _ => bytes,
+    };
+    core.metrics
+        .capture
+        .record(outcome.as_ref().ok(), elapsed, counted_bytes);
+    return outcome;
+}
+
+/// Draw one frame of the scene into a client's DMA-BUF.
+///
+/// No tracker, no offscreen texture, no readback: the client's buffer becomes
+/// the render target. That makes the frame cheaper than even the incremental shm
+/// path, because nothing is copied on the CPU at all — the GPU composites
+/// directly into memory the encoder reads from.
+///
+/// The cost is that a dmabuf frame is always a full repaint, which the capture
+/// client expects anyway: it asked for a picture of the output, and its buffer
+/// holds nothing it could reuse between frames.
+///
+/// The whole buffer is reported as damage, which is correct: everything in it was
+/// written.
+fn capture_into_dmabuf(
+    renderer: &mut GlesRenderer,
+    elements: &[OutputElements<GlesRenderer>],
+    background: [f32; 4],
+    dmabuf: &mut smithay::backend::allocator::dmabuf::Dmabuf,
+    scale: f64,
+) -> anyhow::Result<CaptureOutcome> {
+    use smithay::backend::allocator::Buffer as _;
+    // Rendering works in output pixels; the client's buffer is exactly the
+    // output, so its buffer size is also its physical size.
+    let size: Size<i32, Physical> = Size::from((dmabuf.width() as i32, dmabuf.height() as i32));
+    if size.w <= 0 || size.h <= 0 {
+        anyhow::bail!("the client's dmabuf has no size");
+    }
+    // `Bind<Dmabuf>` imports the buffer and makes it the render target. It fails
+    // for a buffer the renderer cannot write (an unsupported modifier, a format
+    // it cannot render to), which is a client-side problem the frame reports.
+    let mut target = renderer
+        .bind(dmabuf)
+        .map_err(|err| anyhow::anyhow!("cannot render into the capture dmabuf: {err:?}"))?;
+    let mut frame = renderer
+        .render(&mut target, size, Transform::Normal)
+        .map_err(|err| anyhow::anyhow!("cannot start a frame on the capture dmabuf: {err:?}"))?;
+    let full = Rectangle::<i32, Physical>::from_size(size);
+    frame
+        .clear(background.into(), &[full])
+        .map_err(|err| anyhow::anyhow!("cannot clear the capture dmabuf: {err:?}"))?;
+    // Front to back, so drawing back to front is what puts the topmost element
+    // last — the same reverse order the damage tracker uses. The element geometry
+    // is already in output pixels, so the scale here is the output's, not 1.0:
+    // passing 1.0 would misplace every element on a scaled output.
+    let scale = Scale::from(scale);
+    for element in elements.iter().rev() {
+        let dst = Element::geometry(element, scale);
+        let Some(mut damage) = full.intersection(dst) else {
+            continue;
+        };
+        damage.loc -= dst.loc;
+        let cache = UserDataMap::new();
+        RenderElement::<GlesRenderer>::draw(
+            element,
+            &mut frame,
+            Element::src(element),
+            dst,
+            &[damage],
+            &[],
+            Some(&cache),
+        )
+        .map_err(|err| anyhow::anyhow!("cannot draw into the capture dmabuf: {err:?}"))?;
+    }
+    let sync = frame
+        .finish()
+        .map_err(|err| anyhow::anyhow!("cannot finish the capture dmabuf frame: {err:?}"))?;
+    // The client reads this buffer as soon as it is told the frame is ready, so
+    // the drawing has to have landed. There is nothing to defer here: unlike the
+    // shm path there is no later mapping step, and the client is on the other side
+    // of a protocol round trip that this wait is far shorter than.
+    sync.wait()
+        .map_err(|err| anyhow::anyhow!("the capture dmabuf frame was interrupted: {err:?}"))?;
+    // The client's buffer is the whole output and everything in it was just
+    // written by the GPU, so the damage is the whole buffer.
+    return Ok(CaptureOutcome::Dmabuf(Size::from((size.w, size.h))));
 }
 
 /// The background colour and element list a capture of `output` draws.

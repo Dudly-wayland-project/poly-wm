@@ -368,6 +368,7 @@ fn process_request(state: &mut State, request: Request) -> Reply {
             state,
         ))),
         Request::XwaylandStatus => Ok(Response::XwaylandStatus(xwayland_status(state))),
+        Request::Metrics => Ok(Response::Metrics(metrics(state))),
         Request::Action(action) => {
             crate::core::actions::do_ipc_action(state, action);
             Ok(Response::Handled)
@@ -412,6 +413,54 @@ fn process_request(state: &mut State, request: Request) -> Reply {
 /// `enabled` is what the compositor managed to set up, not what the file asked
 /// for: a satellite that cannot inherit sockets leaves the integration off, and
 /// the log and a Toast say why.
+/// The frame and capture counters, as the wire type reports them.
+///
+/// Percentiles come from the compositor's own ring of recent frames, so they
+/// describe what the last couple of seconds looked like rather than the whole
+/// session — which is what a person checking "is it smooth right now" wants.
+fn metrics(state: &State) -> poly_ipc::Metrics {
+    let mut outputs = std::collections::HashMap::new();
+    for (output, metrics) in state.core.metrics.outputs() {
+        outputs.insert(
+            output.name(),
+            poly_ipc::OutputMetrics {
+                frames_submitted: metrics.frames_submitted,
+                frames_no_damage: metrics.frames_no_damage,
+                frames_skipped: metrics.frames_skipped,
+                frames_late: metrics.frames_late,
+                since_last_frame_us: micros(metrics.since_last_frame(std::time::Instant::now())),
+                last_render_us: micros(metrics.last_render),
+                mean_render_us: micros(metrics.mean_render()),
+                p95_render_us: micros(metrics.percentile(0.95)),
+            },
+        );
+    }
+    let capture = &state.core.metrics.capture;
+    let mean_time = if capture.frames == 0 {
+        std::time::Duration::ZERO
+    } else {
+        capture.total_time / u32::try_from(capture.frames).unwrap_or(1)
+    };
+    return poly_ipc::Metrics {
+        outputs,
+        capture: poly_ipc::CaptureMetrics {
+            frames: capture.frames,
+            unchanged: capture.unchanged,
+            deferred: capture.deferred,
+            dmabuf_frames: capture.dmabuf_frames,
+            failed: capture.failed,
+            bytes_read_back: capture.bytes_read_back,
+            last_time_us: micros(capture.last_time),
+            mean_time_us: micros(mean_time),
+        },
+    };
+}
+
+/// Durations on the wire are whole microseconds.
+fn micros(duration: std::time::Duration) -> u64 {
+    return u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
+}
+
 fn xwayland_status(state: &State) -> poly_ipc::XwaylandStatus {
     let config = &state.core.config.xwayland;
     let satellite = state.core.satellite.as_ref();

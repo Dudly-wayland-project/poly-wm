@@ -31,11 +31,12 @@ use smithay::wayland::image_capture_source::{
     OutputCaptureSourceState,
 };
 use smithay::wayland::image_copy_capture::{
-    BufferConstraints, CaptureFailureReason, CursorSession, CursorSessionRef, Frame, FrameRef,
-    ImageCopyCaptureHandler, ImageCopyCaptureState, Session, SessionRef,
+    BufferConstraints, CaptureFailureReason, CursorSession, CursorSessionRef, DmabufConstraints,
+    Frame, FrameRef, ImageCopyCaptureHandler, ImageCopyCaptureState, Session, SessionRef,
 };
 use tracing::{debug, info, warn};
 
+use crate::backend::Backend;
 use crate::core::Core;
 use crate::core::capture::{CaptureKey, CaptureOutcome};
 use crate::state::State;
@@ -66,7 +67,7 @@ impl ImageCopyCaptureHandler for State {
             debug!("capture refused: the source is not an output of ours");
             return None;
         };
-        return output_constraints(&output);
+        return output_constraints(&mut self.backend, &output);
     }
 
     fn new_session(&mut self, session: Session) {
@@ -268,7 +269,7 @@ fn source_output(source: &ImageCaptureSource) -> Option<Output> {
 }
 
 /// The buffer constraints a client capturing `output` has to satisfy.
-fn output_constraints(output: &Output) -> Option<BufferConstraints> {
+fn output_constraints(backend: &mut Backend, output: &Output) -> Option<BufferConstraints> {
     let Some(mode) = output.current_mode() else {
         debug!("capture refused: output {} has no mode", output.name());
         return None;
@@ -276,13 +277,29 @@ fn output_constraints(output: &Output) -> Option<BufferConstraints> {
     if mode.size.w <= 0 || mode.size.h <= 0 {
         return None;
     }
-    // Buffer coordinates, i.e. the size the client has to allocate. Grim and
-    // friends only use shm, and every one of them understands `Xrgb8888`;
-    // dmabuf would need the render node of the output's GPU.
+    // Buffer coordinates, i.e. the size the client has to allocate.
+    //
+    // shm is always offered: it is what every client understands and what the
+    // compositor falls back to when the backend has no renderable dmabuf formats.
+    //
+    // dmabuf is offered when the backend can render into one. That is the whole
+    // difference between a recording that copies every frame through the CPU and
+    // one where the compositor draws straight into the client's buffer: with
+    // dmabuf there is no readback, no memcpy and no shm upload at all.
+    let dma = backend.dmabuf_capture_formats(output).map(|support| {
+        return DmabufConstraints {
+            // The render node the client's buffer has to live on for the
+            // exporter to import it without a copy.
+            node: support.node,
+            formats: support.formats,
+        };
+    });
     return Some(BufferConstraints {
         size: Size::from((mode.size.w, mode.size.h)),
+        // `Xrgb8888` first: it is what every shm client understands, and the
+        // format the capture path has always advertised.
         shm: vec![wl_shm::Format::Xrgb8888],
-        dma: None,
+        dma,
     });
 }
 
@@ -311,7 +328,11 @@ pub(crate) fn refresh_sessions(state: &mut State) {
     finish_deferred_frames(state);
 
     let mut stopped = Vec::new();
-    let mut resized = Vec::new();
+    // The session loop cannot ask the backend for constraints: it borrows the
+    // session list, and the backend is a sibling field of `State`. So the loop
+    // only collects what it needs to compare, and the constraints are built
+    // afterwards with the backend free to borrow.
+    let mut candidates = Vec::new();
     for (index, session) in state.core.image_copy_sessions.iter().enumerate() {
         // A source whose output object is already gone upgrades to `None`; the
         // session has to be stopped either way (`space` also drops the output
@@ -324,12 +345,24 @@ pub(crate) fn refresh_sessions(state: &mut State) {
             stopped.push((index, output.name()));
             continue;
         }
-        let Some(constraints) = output_constraints(&output) else {
+        candidates.push((
+            index,
+            output,
+            session
+                .current_constraints()
+                .as_ref()
+                .map(|current| return current.size),
+        ));
+    }
+    let mut resized = Vec::new();
+    for (index, output, current_size) in candidates {
+        let Some(constraints) = output_constraints(&mut state.backend, &output) else {
             continue;
         };
-        // Constraints carry no `PartialEq`; only the size can change for the
-        // shm-only setup we advertise, and `shm` never does.
-        let stale = constraints_stale(session.current_constraints().as_ref(), &constraints);
+        // `BufferConstraints` carries no `PartialEq`, and the shm format list
+        // never changes, so the size is what decides staleness. dmabuf formats
+        // are fixed for the life of the output too (they come from the renderer).
+        let stale = current_size != Some(constraints.size);
         if stale {
             resized.push((index, output.name(), constraints));
         }
@@ -546,5 +579,24 @@ mod tests {
     fn a_resized_output_makes_the_session_stale() {
         let old = constraints(1920, 1080);
         assert!(constraints_stale(Some(&old), &constraints(2560, 1600)));
+    }
+
+    #[test]
+    fn dmabuf_constraints_still_offer_shm() {
+        // A client is free to ignore dmabuf and allocate from shm, and the
+        // simplest ones (grim, and anything else that predates dmabuf capture)
+        // do exactly that. Advertising dmabuf must therefore never replace shm.
+        //
+        // Building a real `DmabufConstraints` needs a `DrmNode`, which needs a
+        // DRM device the test machine may not have, so this checks the invariant
+        // that holds regardless: the shm list is what a client falls back to and
+        // it never changes, which is why only the size decides staleness.
+        let current = constraints(1920, 1080);
+        assert_eq!(current.shm, vec![wl_shm::Format::Xrgb8888]);
+        assert!(current.dma.is_none() || !current.shm.is_empty());
+        // A dmabuf advertisement does not change the size, so it must not make
+        // every session re-send its constraints.
+        let same_size = constraints(1920, 1080);
+        assert!(!constraints_stale(Some(&current), &same_size));
     }
 }

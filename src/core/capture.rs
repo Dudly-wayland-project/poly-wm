@@ -230,6 +230,12 @@ pub enum CaptureOutcome {
     Damage(Vec<Rectangle<i32, Buffer>>),
     /// Nothing changed and the buffer is still current.
     Unchanged,
+    /// The frame was drawn straight into the client's DMA-BUF of this size.
+    ///
+    /// Distinct from [`Self::Full`] because nothing was read back or copied: the
+    /// GPU wrote the whole buffer. The damage reported to the client is the same
+    /// either way, but the counters tell the two paths apart.
+    Dmabuf(Size<i32, Buffer>),
     /// The pixels are copied out but still on the GPU: the frame has to wait for
     /// its fence and the session lands the readback later
     /// ([`SessionCapture::finish_deferred`]).
@@ -249,6 +255,10 @@ impl CaptureOutcome {
             Self::Full(size) => vec![Rectangle::from_size(*size)],
             Self::Damage(regions) => regions.clone(),
             Self::Unchanged => Vec::new(),
+            // The whole buffer was drawn into, so the client has to treat all of
+            // it as changed. Unlike `Unchanged`, which reports nothing, this has
+            // to report damage — the client is reading new pixels.
+            Self::Dmabuf(size) => vec![Rectangle::from_size(*size)],
             // Not an answer yet: the caller does not report this to the client.
             Self::Deferred => Vec::new(),
         };

@@ -155,4 +155,35 @@ impl Backend {
             Backend::Headless(_) => None,
         };
     }
+
+    /// The DMA-BUF formats `output` can be captured into, if it can at all.
+    ///
+    /// A capture client allocates a buffer up front and the compositor draws
+    /// into it, so it has to be told which `(format, modifier)` pairs the
+    /// renderer can bind as a framebuffer. Offering the list is what turns a
+    /// screencast from "read the framebuffer back and memcpy it into shm" into a
+    /// straight render into the client's own buffer.
+    ///
+    /// `None` means the backend cannot provide this (nested, headless) and the
+    /// client falls back to shm.
+    pub fn dmabuf_capture_formats(&mut self, output: &Output) -> Option<CaptureDmabufSupport> {
+        return match self {
+            Backend::Udev(backend) => backend.dmabuf_capture_formats(output),
+            Backend::Winit(_) | Backend::Headless(_) => None,
+        };
+    }
+}
+
+/// What a backend needs to tell a capture client about DMA-BUF.
+pub struct CaptureDmabufSupport {
+    /// The render node the client's buffer has to live on.
+    ///
+    /// The compositor's exporter can only import it without a copy when it
+    /// belongs to this device.
+    pub node: smithay::backend::drm::DrmNode,
+    /// Renderable `(format, modifier)` pairs.
+    pub formats: Vec<(
+        smithay::backend::allocator::Fourcc,
+        Vec<smithay::backend::allocator::Modifier>,
+    )>,
 }

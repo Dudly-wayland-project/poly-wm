@@ -219,6 +219,23 @@ Outputs whose VRR support would require a modeset are left at a fixed rate:
 blanking the output on every plug-in is a worse trade than the missing
 smoothness.
 
+### Screen capture
+
+`ext-image-copy-capture-v1` and `wlr-screencopy` are always available; nothing
+to configure. On the native backend the compositor also advertises DMA-BUF
+buffers, so a recorder that understands them (OBS, `wl-screenrec`, a portal
+screencast) gets the frame drawn straight into its own buffer — no framebuffer
+readback, no copy through the CPU.
+
+Clients that only know shm keep working and get a cheaper path than they used to:
+the compositor keeps an offscreen copy of the output and only reads back the
+regions that changed since *that buffer* was last written, so a steady recording
+of a mostly static desktop costs almost nothing.
+
+The pointer is included when the client asks for it (`draw_cursor`). A captured
+frame uses the same background colour the output shows, so a screenshot of a
+fullscreen window has the black backdrop in it rather than the wallpaper.
+
 ### `general.animations`
 
 Animations are enabled by default. `duration` is the fallback length in

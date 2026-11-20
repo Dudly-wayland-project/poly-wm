@@ -133,6 +133,12 @@ enum Msg {
     FocusedOutput,
     /// Print the state of the XWayland integration (`xwayland-satellite`).
     Xwayland,
+    /// Print frame and capture counters.
+    ///
+    /// Running totals: run it twice and divide by the time between the runs to
+    /// get rates. `frames_late` is the number that shows stutter, `p95_render_us`
+    /// the one that shows a slow frame.
+    Metrics,
     /// Run an action, spelled as in `config.js`.
     ///
     /// `poly msg action focus-workspace 2`, `poly msg action -- spawn foot -e top`.
@@ -311,6 +317,7 @@ fn send_msg(msg: Msg, json: bool) -> anyhow::Result<()> {
         Msg::FocusedWindow => poly_ipc::Request::FocusedWindow,
         Msg::FocusedOutput => poly_ipc::Request::FocusedOutput,
         Msg::Xwayland => poly_ipc::Request::XwaylandStatus,
+        Msg::Metrics => poly_ipc::Request::Metrics,
         Msg::Action { argv } => poly_ipc::Request::Action(poly_ipc::Action::from_argv(&argv)?),
         Msg::Layout { name, output } => poly_ipc::Request::LayoutSwitch { output, name },
         Msg::Output { output, action } => poly_ipc::Request::OutputConfig {
@@ -392,6 +399,7 @@ fn print_response(response: &poly_ipc::Response, json: bool) -> anyhow::Result<(
         poly_ipc::Response::FocusedOutput(Some(name)) => println!("{name}"),
         poly_ipc::Response::FocusedOutput(None) => println!("no focused output"),
         poly_ipc::Response::XwaylandStatus(status) => print_xwayland(status),
+        poly_ipc::Response::Metrics(metrics) => print_metrics(metrics),
         poly_ipc::Response::OutputConfigChanged(changed) => match changed {
             poly_ipc::OutputConfigChanged::Applied => println!("applied"),
             poly_ipc::OutputConfigChanged::OutputWasMissing => {
@@ -417,6 +425,7 @@ fn json_payload(response: &poly_ipc::Response) -> serde_json::Result<String> {
         poly_ipc::Response::FocusedOutput(output) => serde_json::to_value(output)?,
         poly_ipc::Response::OutputConfigChanged(changed) => serde_json::to_value(changed)?,
         poly_ipc::Response::XwaylandStatus(status) => serde_json::to_value(status)?,
+        poly_ipc::Response::Metrics(metrics) => serde_json::to_value(metrics)?,
     };
     return Ok(value.to_string());
 }
@@ -454,6 +463,53 @@ fn print_outputs(outputs: &std::collections::HashMap<String, poly_ipc::Output>) 
 }
 
 /// The XWayland integration in words (`poly msg xwayland`).
+/// Print the frame and capture counters for a person reading a terminal.
+///
+/// Durations are shown in milliseconds with two decimals: microseconds are what
+/// the wire carries, but a human comparing a 16.6 ms frame budget against the
+/// numbers wants milliseconds.
+fn print_metrics(metrics: &poly_ipc::Metrics) {
+    println!("Frames");
+    if metrics.outputs.is_empty() {
+        println!("  (no outputs)");
+    }
+    for (name, output) in &metrics.outputs {
+        println!("  {name}");
+        println!(
+            "    submitted {}  no-damage {}  skipped {}  late {}",
+            output.frames_submitted,
+            output.frames_no_damage,
+            output.frames_skipped,
+            output.frames_late
+        );
+        println!(
+            "    render: last {:.2} ms  mean {:.2} ms  p95 {:.2} ms  (since last frame {:.2} ms)",
+            ms(output.last_render_us),
+            ms(output.mean_render_us),
+            ms(output.p95_render_us),
+            ms(output.since_last_frame_us),
+        );
+    }
+    let capture = &metrics.capture;
+    println!("Capture");
+    println!(
+        "  frames {}  unchanged {}  deferred {}  dmabuf {}  failed {}",
+        capture.frames, capture.unchanged, capture.deferred, capture.dmabuf_frames, capture.failed
+    );
+    println!(
+        "  read back {:.1} MiB  last {:.2} ms  mean {:.2} ms",
+        capture.bytes_read_back as f64 / (1024.0 * 1024.0),
+        ms(capture.last_time_us),
+        ms(capture.mean_time_us),
+    );
+    return;
+}
+
+/// Microseconds on the wire, milliseconds in the terminal.
+fn ms(micros: u64) -> f64 {
+    return micros as f64 / 1000.0;
+}
+
 fn print_xwayland(status: &poly_ipc::XwaylandStatus) {
     if !status.enabled {
         match status.configured {

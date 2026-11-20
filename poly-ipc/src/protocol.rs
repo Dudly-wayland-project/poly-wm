@@ -34,6 +34,13 @@ pub enum Request {
     FocusedOutput,
     /// Ask for the state of the XWayland integration (`xwayland-satellite`).
     XwaylandStatus,
+    /// Ask for frame and capture counters.
+    ///
+    /// The numbers are running totals, not rates: read them twice and divide by
+    /// the time between reads to get "frames per second" or "percent of frames
+    /// late". Nothing is sampled on a timer, so asking costs the compositor a
+    /// map lookup and a few additions.
+    Metrics,
     /// Run an action from the shared vocabulary (`poly-ipc::Action`).
     Action(Action),
     /// Re-read the configuration from disk.
@@ -111,6 +118,68 @@ pub enum Response {
     OutputConfigChanged(OutputConfigChanged),
     /// The XWayland integration, for [`Request::XwaylandStatus`].
     XwaylandStatus(XwaylandStatus),
+    /// Frame and capture counters, for [`Request::Metrics`].
+    Metrics(Metrics),
+}
+
+/// Frame and capture counters.
+///
+/// Durations are microseconds: they are integers on the wire, and a whole
+/// millisecond would hide the difference between a frame that fits its slot and
+/// one that does not.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Metrics {
+    /// Per-output frame counters, keyed by output name.
+    pub outputs: HashMap<String, OutputMetrics>,
+    /// Capture counters, across every session.
+    pub capture: CaptureMetrics,
+}
+
+/// Frame counters of one output.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OutputMetrics {
+    /// Frames handed to the display.
+    pub frames_submitted: u64,
+    /// Rendered frames with no damage that were not presented.
+    pub frames_no_damage: u64,
+    /// Renders that produced no frame (paused session, lost device).
+    pub frames_skipped: u64,
+    /// Frames that missed their slot, i.e. arrived more than one and a half
+    /// refresh intervals after the previous one.
+    ///
+    /// This is what a user perceives as stutter, and it stays visible long after
+    /// the average frame rate has recovered.
+    pub frames_late: u64,
+    /// Time since the last submitted frame, in microseconds.
+    pub since_last_frame_us: u64,
+    /// Duration of the most recent render call, in microseconds.
+    pub last_render_us: u64,
+    /// Mean render duration over the recent history, in microseconds.
+    pub mean_render_us: u64,
+    /// 95th percentile render duration over the recent history, in
+    /// microseconds. A hitch shows up here while the mean still looks healthy.
+    pub p95_render_us: u64,
+}
+
+/// Capture counters, across every session.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CaptureMetrics {
+    /// Frames rendered for a client.
+    pub frames: u64,
+    /// Frames that found nothing to change and copied nothing.
+    pub unchanged: u64,
+    /// Frames whose readback was deferred to a later iteration.
+    pub deferred: u64,
+    /// Frames drawn straight into a client's DMA-BUF, with no readback at all.
+    pub dmabuf_frames: u64,
+    /// Frames that produced no image at all.
+    pub failed: u64,
+    /// Bytes copied out of the framebuffer, over the process lifetime.
+    pub bytes_read_back: u64,
+    /// Duration of the most recent capture, in microseconds.
+    pub last_time_us: u64,
+    /// Mean capture duration, in microseconds.
+    pub mean_time_us: u64,
 }
 
 /// The state of the XWayland integration.

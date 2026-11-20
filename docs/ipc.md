@@ -79,6 +79,7 @@ it.
 | FocusedWindow | `"FocusedWindow"` | `{"FocusedWindow":{...}}` or `{"FocusedWindow":null}` |
 | FocusedOutput | `"FocusedOutput"` | `{"FocusedOutput":"eDP-1"}` or `{"FocusedOutput":null}` |
 | XwaylandStatus | `"XwaylandStatus"` | `{"XwaylandStatus":{...}}` |
+| Metrics | `"Metrics"` | `{"Metrics":{...}}` |
 | Action | `{"Action":<action>}` | `"Handled"` |
 | ReloadConfig | `"ReloadConfig"` | `"Handled"` |
 | OutputConfig | `{"OutputConfig":{"output":"eDP-1","action":<output action>}}` | `{"OutputConfigChanged":"Applied"}` |
@@ -286,6 +287,64 @@ Moving workspaces changes indices.
 | `running` | bool | Whether an `xwayland-satellite` process is running now. |
 | `on_demand` | bool | Effective activation mode; a failing keep-running satellite falls back to on-demand. |
 | `satellite_path` | string | Program that is started. |
+
+### `Metrics`
+
+Frame and capture counters. Every value is a running total or a duration in
+**microseconds**; nothing is sampled on a timer, so the numbers are a snapshot of
+the compositor's own bookkeeping.
+
+```json
+{
+  "outputs": {
+    "eDP-1": {
+      "frames_submitted": 18042,
+      "frames_no_damage": 311,
+      "frames_skipped": 0,
+      "frames_late": 27,
+      "since_last_frame_us": 16680,
+      "last_render_us": 2104,
+      "mean_render_us": 1893,
+      "p95_render_us": 4210
+    }
+  },
+  "capture": {
+    "frames": 900,
+    "unchanged": 41,
+    "deferred": 6,
+    "dmabuf_frames": 850,
+    "failed": 0,
+    "bytes_read_back": 41943040,
+    "last_time_us": 1802,
+    "mean_time_us": 1655
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `outputs.<name>.frames_submitted` | Frames handed to the display. |
+| `outputs.<name>.frames_no_damage` | Rendered frames with no damage, not presented. |
+| `outputs.<name>.frames_skipped` | Renders that produced no frame (paused session, lost device). |
+| `outputs.<name>.frames_late` | Frames that arrived later than one and a half refresh intervals after the previous one. This is what stutter looks like; the average rate hides it. |
+| `outputs.<name>.since_last_frame_us` | Time since the last submitted frame, measured when the request was answered. |
+| `outputs.<name>.last_render_us` | Duration of the most recent render call. |
+| `outputs.<name>.mean_render_us` | Mean render duration over the recent history. |
+| `outputs.<name>.p95_render_us` | 95th percentile render duration over the recent history (about two seconds at 60 Hz). A hitch shows up here while the mean still looks healthy. |
+| `capture.frames` | Capture frames rendered for a client. |
+| `capture.unchanged` | Frames that found nothing to change and copied nothing. |
+| `capture.deferred` | Frames whose readback was completed on a later event loop iteration. |
+| `capture.dmabuf_frames` | Frames drawn straight into a client's DMA-BUF, with no readback. |
+| `capture.failed` | Frames that produced no image at all. |
+| `capture.bytes_read_back` | Bytes copied out of the framebuffer, over the process lifetime. |
+| `capture.last_time_us`, `capture.mean_time_us` | Capture duration, most recent and mean. |
+
+Because every field is cumulative, read it twice and divide by the time between
+the reads to get rates:
+
+```sh
+a=$(poly msg metrics --json); sleep 5; b=$(poly msg metrics --json)
+```
 
 ### `OutputConfigChanged`
 

@@ -20,8 +20,9 @@ mod state;
 
 pub use action::{Action, InvalidAction, argless_action_names};
 pub use protocol::{
-    Event, FullscreenMode, Mode, Output, OutputAction, OutputConfigChanged, Reply, Request,
-    Response, Window, Workspace, XwaylandStatus,
+    CaptureMetrics, Event, FullscreenMode, Metrics, Mode, Output, OutputAction,
+    OutputConfigChanged, OutputMetrics, Reply, Request, Response, Window, Workspace,
+    XwaylandStatus,
 };
 pub use socket::{IpcError, SOCKET_ENV, Socket, socket_path};
 pub use state::{

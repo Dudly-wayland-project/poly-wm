@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
-use smithay::backend::allocator::Fourcc;
 use smithay::backend::allocator::format::FormatSet;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
+use smithay::backend::allocator::{Fourcc, Modifier};
 use smithay::backend::drm::compositor::{FrameFlags, PrimaryPlaneElement};
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements};
@@ -437,6 +437,7 @@ impl Udev {
             }
             core.lock_backgrounds.remove(&output);
             core.xray_buffers.remove(&output);
+            core.metrics.remove_output(&output);
             core.lock_surfaces
                 .retain(|(lock_output, _)| return lock_output != &output);
         }
@@ -666,6 +667,7 @@ impl Udev {
                 core.output_state.remove(&output);
                 core.lock_backgrounds.remove(&output);
                 core.xray_buffers.remove(&output);
+                core.metrics.remove_output(&output);
                 core.lock_surfaces
                     .retain(|(lock_output, _)| return lock_output != &output);
                 return;
@@ -729,6 +731,7 @@ impl Udev {
         }
         core.lock_backgrounds.remove(&output);
         core.xray_buffers.remove(&output);
+        core.metrics.remove_output(&output);
         core.lock_surfaces
             .retain(|(lock_output, _)| return lock_output != &output);
         core.queue_redraw_all();
@@ -751,6 +754,37 @@ impl Udev {
         let render_node = self.devices.get(&id.node)?.render_node;
         let mut renderer = self.gpus.single_renderer(&render_node).ok()?;
         return Some(f(renderer.as_gles_renderer()));
+    }
+
+    /// The DMA-BUF formats `output` can be captured into.
+    ///
+    /// A capture client has to allocate its buffer before the compositor draws
+    /// into it, so the formats have to be known up front. The renderer's own
+    /// render-format list is the answer: if it can bind a dmabuf of that
+    /// `(format, modifier)` as a framebuffer, a frame can be drawn straight into
+    /// the client's buffer with no readback at all.
+    ///
+    /// The render node is reported alongside, because that is where the client's
+    /// buffer has to live for the exporter to import it without a copy.
+    pub fn dmabuf_capture_formats(
+        &mut self,
+        output: &Output,
+    ) -> Option<crate::backend::CaptureDmabufSupport> {
+        let id = output.user_data().get::<UdevOutputId>().copied()?;
+        let node = self.devices.get(&id.node)?.render_node;
+        let mut renderer = self.gpus.single_renderer(&node).ok()?;
+        let formats: Vec<(Fourcc, Vec<Modifier>)> = renderer
+            .as_gles_renderer()
+            .egl_context()
+            .dmabuf_render_formats()
+            .iter()
+            .map(|format| return (format.code, vec![format.modifier]))
+            .collect();
+        if formats.is_empty() {
+            debug!("no renderable dmabuf format on {node:?}; captures use shm");
+            return None;
+        }
+        return Some(crate::backend::CaptureDmabufSupport { node, formats });
     }
 
     /// Render one output.

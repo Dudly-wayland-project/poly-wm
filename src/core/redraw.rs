@@ -242,8 +242,20 @@ impl State {
             if queued {
                 // Trace level: a redraw can be queued for every input event.
                 trace!("redrawing output {}", output.name());
+                let started = std::time::Instant::now();
                 let result = self.backend.render(&mut self.core, &output);
+                let elapsed = started.elapsed();
                 trace!("render of {} returned {result:?}", output.name());
+                // Counted here rather than in the backend: this is the cost the
+                // event loop pays for the frame, which is what a stutter is made
+                // of, and every backend reports through this one call.
+                let interval = frame_interval(&output);
+                self.core.metrics.output(&output).record(
+                    result,
+                    elapsed,
+                    std::time::Instant::now(),
+                    interval,
+                );
                 self.on_output_rendered(&output, result);
             }
         }
