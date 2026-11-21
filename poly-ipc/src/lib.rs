@@ -20,7 +20,7 @@ mod state;
 
 pub use action::{Action, InvalidAction, argless_action_names};
 pub use protocol::{
-    CaptureMetrics, Event, FullscreenMode, Metrics, Mode, Output, OutputAction,
+    CaptureMetrics, Event, FullscreenMode, LoopMetrics, Metrics, Mode, Output, OutputAction,
     OutputConfigChanged, OutputMetrics, Reply, Request, Response, Window, Workspace,
     XwaylandStatus,
 };

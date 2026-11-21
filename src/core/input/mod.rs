@@ -1044,7 +1044,11 @@ fn focus_layer_click(state: &mut State, layer_surface: &smithay::desktop::LayerS
 }
 
 /// Whether the pointer currently has one of our drag grabs.
-fn drag_grab_active(state: &State) -> bool {
+///
+/// Public within the crate because the renderer degrades during a drag: moving
+/// or resizing a window is the case where every frame is redrawn from scratch,
+/// and on a slow GPU that is exactly when the expensive effects have to give way.
+pub(crate) fn drag_grab_active(state: &State) -> bool {
     let Some(pointer) = state.core.seat.get_pointer() else {
         return false;
     };

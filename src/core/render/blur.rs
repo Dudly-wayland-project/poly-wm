@@ -657,9 +657,23 @@ fn render_passes(
         gl.Disable(ffi::SCISSOR_TEST);
         gl.ActiveTexture(ffi::TEXTURE0);
 
-        let mut fbo = 0;
-        gl.GenFramebuffers(1, &mut fbo as *mut _);
-        gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
+        // Two framebuffers, alternating. Re-binding a texture to a single
+        // framebuffer forces the driver to re-validate it on every pass; with a
+        // ping-pong pair each pass switches between two already-complete
+        // framebuffers instead.
+        //
+        // They are still created and deleted per blur (not cached across frames):
+        // the cache would live in a `UserDataMap` whose lifetime the compositor
+        // does not control, and a leaked framebuffer outlives any saving here.
+        let mut fbos = [0; 2];
+        gl.GenFramebuffers(fbos.len() as _, fbos.as_mut_ptr());
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, fbos[0]);
+        // The pass index selects which of the pair the next draw targets.
+        let mut target_fbo = 0usize;
+
+        // Which textures this blur has already given the sampling parameters it
+        // needs; see `bind_linear`.
+        let mut configured: Vec<ffi::types::GLuint> = Vec::with_capacity(textures.len() + 1);
 
         let vertices: [f32; 12] = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0];
 
@@ -693,6 +707,8 @@ fn render_passes(
                 0.5 / size.w as f32,
                 0.5 / size.h as f32,
             );
+            // Alternate the framebuffer, then attach the target texture.
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, fbos[target_fbo]);
             gl.FramebufferTexture2D(
                 ffi::FRAMEBUFFER,
                 ffi::COLOR_ATTACHMENT0,
@@ -700,7 +716,8 @@ fn render_passes(
                 target.tex_id(),
                 0,
             );
-            bind_linear(gl, source.tex_id());
+            target_fbo ^= 1;
+            bind_linear(gl, source.tex_id(), &mut configured);
             gl.DrawArrays(ffi::TRIANGLES, 0, 6);
         }
         gl.DisableVertexAttribArray(pass.attrib_vert as u32);
@@ -732,6 +749,7 @@ fn render_passes(
                 0.5 / source_size.w as f32,
                 0.5 / source_size.h as f32,
             );
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, fbos[target_fbo]);
             gl.FramebufferTexture2D(
                 ffi::FRAMEBUFFER,
                 ffi::COLOR_ATTACHMENT0,
@@ -739,13 +757,14 @@ fn render_passes(
                 target.tex_id(),
                 0,
             );
-            bind_linear(gl, source.tex_id());
+            target_fbo ^= 1;
+            bind_linear(gl, source.tex_id(), &mut configured);
             gl.DrawArrays(ffi::TRIANGLES, 0, 6);
         }
         gl.DisableVertexAttribArray(pass.attrib_vert as u32);
 
         // Restore the GL state.
-        gl.DeleteFramebuffers(1, &fbo as *const _);
+        gl.DeleteFramebuffers(fbos.len() as _, fbos.as_ptr());
         gl.BindFramebuffer(ffi::FRAMEBUFFER, previous_fbo as u32);
         gl.Viewport(
             previous_viewport[0],
@@ -768,9 +787,29 @@ fn render_passes(
     return Ok(textures[0].clone());
 }
 
-unsafe fn bind_linear(gl: &ffi::Gles2, texture: ffi::types::GLuint) {
+/// Bind `texture` as the source for the next draw, sampling it linearly.
+///
+/// The filter and wrap parameters are set once per texture, not once per bind:
+/// they are texture state that persists, and on a driver that has to validate
+/// every state change this was eight redundant calls per blur pass — eighteen per
+/// frame for a two-pass blur. The set of textures a blur chain uses is small and
+/// fixed, so remembering which ones are already set up costs nothing.
+///
+/// `bound` is that memory: a texture id that has been configured in this pass.
+/// It is reset at the start of every blur, because another element may have
+/// changed the parameters in between — this is a cache of *our* calls, not a
+/// claim about the driver's state.
+fn bind_linear(
+    gl: &ffi::Gles2,
+    texture: ffi::types::GLuint,
+    configured: &mut Vec<ffi::types::GLuint>,
+) {
     unsafe {
         gl.BindTexture(ffi::TEXTURE_2D, texture);
+        if configured.contains(&texture) {
+            return;
+        }
+        configured.push(texture);
         gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
         gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
         gl.TexParameteri(

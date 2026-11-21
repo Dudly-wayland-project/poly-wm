@@ -432,6 +432,8 @@ fn metrics(state: &State) -> poly_ipc::Metrics {
                 last_render_us: micros(metrics.last_render),
                 mean_render_us: micros(metrics.mean_render()),
                 p95_render_us: micros(metrics.percentile(0.95)),
+                last_sync_wait_us: micros(metrics.last_sync_wait),
+                worst_sync_wait_us: micros(metrics.worst_sync_wait),
             },
         );
     }
@@ -453,12 +455,29 @@ fn metrics(state: &State) -> poly_ipc::Metrics {
             last_time_us: micros(capture.last_time),
             mean_time_us: micros(mean_time),
         },
+        loop_time: poly_ipc::LoopMetrics {
+            iterations: state.core.metrics.loop_time.iterations,
+            last_total_ns: nanos(state.core.metrics.loop_time.last_total),
+            last_update_ns: nanos(state.core.metrics.loop_time.last_update),
+            last_render_ns: nanos(state.core.metrics.loop_time.last_render),
+            last_flush_ns: nanos(state.core.metrics.loop_time.last_flush),
+            worst_total_ns: nanos(state.core.metrics.loop_time.worst_total),
+            worst_phase: String::from(state.core.metrics.loop_time.worst_phase),
+        },
     };
 }
 
 /// Durations on the wire are whole microseconds.
 fn micros(duration: std::time::Duration) -> u64 {
     return u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
+}
+
+/// Durations on the wire are whole nanoseconds.
+///
+/// Only the event loop phases use these: they are routinely under a microsecond,
+/// and rounding them to microseconds made them all read as zero.
+fn nanos(duration: std::time::Duration) -> u64 {
+    return u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
 }
 
 fn xwayland_status(state: &State) -> poly_ipc::XwaylandStatus {

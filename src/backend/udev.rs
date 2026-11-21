@@ -904,9 +904,18 @@ impl Udev {
                 Ok(result) => {
                     if result.needs_sync() {
                         if let PrimaryPlaneElement::Swapchain(element) = &result.primary_element {
+                            // The wait below blocks until the GPU finished drawing
+                            // the frame. On hardware that cannot export a fence
+                            // this is the one place the CPU waits for the GPU, so
+                            // it is measured separately: bundling it into the
+                            // frame time hides what a slow GPU actually costs.
+                            let waited = std::time::Instant::now();
                             if let Err(err) = element.sync.wait() {
                                 warn!("error waiting for frame completion: {err:?}");
                             }
+                            core.metrics
+                                .output(output)
+                                .record_sync_wait(waited.elapsed());
                         }
                     }
 

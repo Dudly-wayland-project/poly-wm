@@ -59,6 +59,15 @@ pub struct OutputMetrics {
     pub last_render: Duration,
     /// Running total of [`Self::last_render`], for an average.
     pub total_render: Duration,
+    /// Time spent blocked waiting for the GPU to finish the frame.
+    ///
+    /// Separate from the render time on purpose: on hardware that cannot export
+    /// a fence, the compositor has to wait for completion before queueing the
+    /// frame, and that wait is where a weak GPU's cost actually shows up. It is
+    /// zero on hardware that can hand the fence to KMS.
+    pub last_sync_wait: Duration,
+    /// Slowest frame completion wait seen since startup.
+    pub worst_sync_wait: Duration,
     /// Most recent frame durations, for percentiles.
     recent: [Duration; FRAME_HISTORY],
     /// Write index into [`Self::recent`].
@@ -75,6 +84,8 @@ impl Default for OutputMetrics {
             last_frame_at: None,
             last_render: Duration::ZERO,
             total_render: Duration::ZERO,
+            last_sync_wait: Duration::ZERO,
+            worst_sync_wait: Duration::ZERO,
             // `[Duration; N]` has no `Default` (Duration is not `Copy`), so the
             // ring is filled by hand.
             recent: [Duration::ZERO; FRAME_HISTORY],
@@ -121,6 +132,15 @@ impl OutputMetrics {
             RenderResult::NoDamage => self.frames_no_damage += 1,
             RenderResult::Skipped => self.frames_skipped += 1,
         }
+    }
+
+    /// Record how long one frame waited for the GPU to finish.
+    pub fn record_sync_wait(&mut self, waited: Duration) {
+        self.last_sync_wait = waited;
+        if waited > self.worst_sync_wait {
+            self.worst_sync_wait = waited;
+        }
+        return;
     }
 
     /// How long ago the last frame was submitted.
@@ -206,12 +226,60 @@ impl CaptureMetrics {
     }
 }
 
+/// Where the event loop spends its time.
+///
+/// Without this the only visible number is the render call, which says nothing
+/// about a frame that took 100 ms to even reach it. These are the four phases of
+/// one iteration; a hitch in any of them shows up here.
+#[derive(Debug, Default, Clone)]
+pub struct LoopMetrics {
+    /// Iterations of the event loop callback.
+    pub iterations: u64,
+    /// Most recent total iteration time.
+    pub last_total: Duration,
+    /// Most recent cost of updating client state (`space.refresh`, layout tick,
+    /// popup cleanup).
+    pub last_update: Duration,
+    /// Most recent cost of building and drawing the queued frames.
+    pub last_render: Duration,
+    /// Most recent cost of flushing client connections.
+    pub last_flush: Duration,
+    /// The slowest iteration seen since the counters started, and what it was.
+    pub worst_total: Duration,
+    /// Which phase dominated that worst iteration.
+    pub worst_phase: &'static str,
+}
+
+impl LoopMetrics {
+    /// Record one iteration.
+    pub fn record(&mut self, total: Duration, update: Duration, render: Duration, flush: Duration) {
+        self.iterations += 1;
+        self.last_total = total;
+        self.last_update = update;
+        self.last_render = render;
+        self.last_flush = flush;
+        if total > self.worst_total {
+            self.worst_total = total;
+            self.worst_phase = if render >= update && render >= flush {
+                "render"
+            } else if update >= flush {
+                "update"
+            } else {
+                "flush"
+            };
+        }
+        return;
+    }
+}
+
 /// Every output's frame counters.
 #[derive(Debug, Default)]
 pub struct Metrics {
     outputs: HashMap<Output, OutputMetrics>,
     /// Capture counters, across all sessions.
     pub capture: CaptureMetrics,
+    /// Event loop phase timing.
+    pub loop_time: LoopMetrics,
 }
 
 impl Metrics {

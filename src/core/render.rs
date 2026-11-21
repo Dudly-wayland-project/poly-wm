@@ -894,6 +894,7 @@ fn push_window<R>(
         clip: Some(card_rect),
         blur_region: blur_region.as_deref(),
         xray,
+        blur_passes: blur_pass_budget(core),
     };
     let decorations = core.decorations.prepare(&inputs, &core.shaders);
 
@@ -1200,6 +1201,23 @@ fn push_layers<R>(
 /// offscreen backdrop across frames, and the commit counter of the surface
 /// drives repaints: a bar that repaints its own blur region does not reallocate
 /// the blur textures every frame.
+/// The blur pass budget while the compositor is in its current state.
+///
+/// A drag redraws a window at a new position every frame, which is the most
+/// expensive frame the compositor produces, and it is also the moment the user is
+/// watching latency rather than detail. On a GPU that cannot keep up, dropping to
+/// a single pass keeps the drag responsive; the configured value applies the rest
+/// of the time, so nothing looks different once the drag ends.
+///
+/// This is the *ceiling*: a window whose own rules ask for fewer passes keeps its
+/// lower value (see `decorations::degrade_passes`).
+fn blur_pass_budget(core: &Core) -> u32 {
+    if core.interactive_drag() {
+        return 1;
+    }
+    return core.config.general.blur.passes.clamp(1, 16);
+}
+
 fn layer_blur(
     core: &Core,
     surface: &WlSurface,
@@ -1220,7 +1238,8 @@ fn layer_blur(
         return state.current_commit();
     })
     .unwrap_or_default();
-    let passes = config.passes.clamp(1, 16);
+    let passes =
+        crate::core::render::decorations::degrade_passes(blur_pass_budget(core), config.passes);
     return Some(BlurElement::new(
         // The surface's own render element already owns the plain wayland id.
         // A blur element is a framebuffer effect, and two elements sharing one

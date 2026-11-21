@@ -290,9 +290,9 @@ Moving workspaces changes indices.
 
 ### `Metrics`
 
-Frame and capture counters. Every value is a running total or a duration in
-**microseconds**; nothing is sampled on a timer, so the numbers are a snapshot of
-the compositor's own bookkeeping.
+Frame and capture counters. Every value is a running total or a duration, in
+**microseconds** unless the field name ends in `_ns`; nothing is sampled on a
+timer, so the numbers are a snapshot of the compositor's own bookkeeping.
 
 ```json
 {
@@ -305,7 +305,9 @@ the compositor's own bookkeeping.
       "since_last_frame_us": 16680,
       "last_render_us": 2104,
       "mean_render_us": 1893,
-      "p95_render_us": 4210
+      "p95_render_us": 4210,
+      "last_sync_wait_us": 0,
+      "worst_sync_wait_us": 0
     }
   },
   "capture": {
@@ -317,6 +319,15 @@ the compositor's own bookkeeping.
     "bytes_read_back": 41943040,
     "last_time_us": 1802,
     "mean_time_us": 1655
+  },
+  "loop_time": {
+    "iterations": 18042,
+    "last_total_ns": 61234,
+    "last_update_ns": 4012,
+    "last_render_ns": 51200,
+    "last_flush_ns": 1203,
+    "worst_total_ns": 104300000,
+    "worst_phase": "render"
   }
 }
 ```
@@ -331,6 +342,8 @@ the compositor's own bookkeeping.
 | `outputs.<name>.last_render_us` | Duration of the most recent render call. |
 | `outputs.<name>.mean_render_us` | Mean render duration over the recent history. |
 | `outputs.<name>.p95_render_us` | 95th percentile render duration over the recent history (about two seconds at 60 Hz). A hitch shows up here while the mean still looks healthy. |
+| `outputs.<name>.last_sync_wait_us` | Most recent wait for the GPU to finish the frame. Nonzero only when the hardware cannot export a DRM fence; there the CPU must wait before queueing. |
+| `outputs.<name>.worst_sync_wait_us` | Slowest such wait since startup. |
 | `capture.frames` | Capture frames rendered for a client. |
 | `capture.unchanged` | Frames that found nothing to change and copied nothing. |
 | `capture.deferred` | Frames whose readback was completed on a later event loop iteration. |
@@ -338,6 +351,13 @@ the compositor's own bookkeeping.
 | `capture.failed` | Frames that produced no image at all. |
 | `capture.bytes_read_back` | Bytes copied out of the framebuffer, over the process lifetime. |
 | `capture.last_time_us`, `capture.mean_time_us` | Capture duration, most recent and mean. |
+| `loop_time.iterations` | Event loop iterations recorded so far. |
+| `loop_time.last_total_ns` | Duration of the most recent iteration, including the three phases below. |
+| `loop_time.last_update_ns` | Cost of refreshing client state (`space.refresh`, layout tick, popup cleanup). |
+| `loop_time.last_render_ns` | Cost of building and drawing the queued frames. |
+| `loop_time.last_flush_ns` | Cost of flushing client connections. |
+| `loop_time.worst_total_ns` | Slowest iteration since startup. |
+| `loop_time.worst_phase` | Which phase dominated that iteration: `"update"`, `"render"` or `"flush"`. |
 
 Because every field is cumulative, read it twice and divide by the time between
 the reads to get rates:

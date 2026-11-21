@@ -489,7 +489,32 @@ fn print_metrics(metrics: &poly_ipc::Metrics) {
             ms(output.p95_render_us),
             ms(output.since_last_frame_us),
         );
+        if output.last_sync_wait_us > 0 || output.worst_sync_wait_us > 0 {
+            println!(
+                "    gpu wait: last {:.2} ms  worst {:.2} ms",
+                ms(output.last_sync_wait_us),
+                ms(output.worst_sync_wait_us),
+            );
+        }
     }
+    let loop_time = &metrics.loop_time;
+    println!("Event loop");
+    println!("  iterations {}", loop_time.iterations);
+    // Nanoseconds on the wire, milliseconds on screen. Three decimals, because a
+    // healthy iteration is a few tens of microseconds and rounding that to two
+    // decimals of a millisecond hides the difference between phases.
+    println!(
+        "  total {:.3} ms  (update {:.3}  render {:.3}  flush {:.3})",
+        ns_to_ms(loop_time.last_total_ns),
+        ns_to_ms(loop_time.last_update_ns),
+        ns_to_ms(loop_time.last_render_ns),
+        ns_to_ms(loop_time.last_flush_ns),
+    );
+    println!(
+        "  worst {:.3} ms, dominated by {}",
+        ns_to_ms(loop_time.worst_total_ns),
+        loop_time.worst_phase
+    );
     let capture = &metrics.capture;
     println!("Capture");
     println!(
@@ -508,6 +533,11 @@ fn print_metrics(metrics: &poly_ipc::Metrics) {
 /// Microseconds on the wire, milliseconds in the terminal.
 fn ms(micros: u64) -> f64 {
     return micros as f64 / 1000.0;
+}
+
+/// Nanoseconds to milliseconds, for the event loop phases.
+fn ns_to_ms(nanos: u64) -> f64 {
+    return nanos as f64 / 1_000_000.0;
 }
 
 fn print_xwayland(status: &poly_ipc::XwaylandStatus) {

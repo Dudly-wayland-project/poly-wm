@@ -66,6 +66,22 @@ pub struct DecorationInputs<'a> {
     ///
     /// The blur element then samples it instead of capturing the framebuffer.
     pub xray: Option<&'a Rc<RefCell<XrayBuffer>>>,
+    /// Blur pass pairs to run for this window.
+    ///
+    /// Normally the configured value; a drag lowers it (see
+    /// [`super::blur_passes`]) because a moving window is redrawn from scratch
+    /// every frame and that is when the cost is least affordable.
+    pub blur_passes: u32,
+}
+
+/// The pass count to actually run for a window.
+///
+/// `interactive` is what the compositor asks for right now (lowered during a
+/// drag), `configured` is what the window's own rules asked for. A drag can only
+/// reduce work, never add it, so the smaller of the two wins — a window that was
+/// configured with one pass does not suddenly get four.
+pub(super) fn degrade_passes(interactive: u32, configured: u32) -> u32 {
+    return interactive.min(configured).clamp(1, 16);
 }
 
 /// Normalize `clip` (output-local logical) into the window's geometry space,
@@ -462,7 +478,7 @@ impl Decorations {
         };
 
         let key = BlurKey {
-            passes: params.passes,
+            passes: degrade_passes(inputs.blur_passes, params.passes),
             offset_bits: params.offset.to_bits(),
             noise: params.noise,
             radius: <[f32; 4]>::from(radius),
@@ -501,7 +517,7 @@ impl Decorations {
             radius,
             inputs.scale,
             BlurOptions {
-                passes: params.passes,
+                passes: degrade_passes(inputs.blur_passes, params.passes),
                 offset: params.offset,
             },
             params.noise,
@@ -564,6 +580,7 @@ mod tests {
             clip: None,
             blur_region,
             xray: None,
+            blur_passes: 2,
         };
     }
 
@@ -643,5 +660,21 @@ mod tests {
         };
         assert_eq!(regions.len(), 40);
         assert!(!regions.iter().any(|r| return r.contains((0, 0))));
+    }
+
+    #[test]
+    fn a_drag_lowers_the_pass_count_but_never_raises_it() {
+        // During a drag the compositor asks for one pass, so a window configured
+        // for two gets the cheaper setting.
+        assert_eq!(degrade_passes(1, 2), 1);
+        assert_eq!(degrade_passes(1, 8), 1);
+        // A window already configured for a single pass keeps it.
+        assert_eq!(degrade_passes(1, 1), 1);
+        // Outside a drag the budget is the configured value, so the window's own
+        // rule is not raised by a larger global default.
+        assert_eq!(degrade_passes(4, 2), 2);
+        assert_eq!(degrade_passes(4, 4), 4);
+        // A zero from a misread configuration cannot produce a no-op chain.
+        assert_eq!(degrade_passes(0, 0), 1);
     }
 }

@@ -935,6 +935,28 @@ impl Core {
         self.output_state(output).frame_clock.presented(time);
     }
 
+    /// Whether a window is being moved or resized right now.
+    ///
+    /// During a drag every frame is a full redraw of a window at a new position,
+    /// which is the most expensive thing the compositor does. On a GPU that
+    /// cannot keep up, the costly effects (blur) drop to their cheapest setting
+    /// while this holds, so the drag itself stays responsive.
+    pub fn interactive_drag(&self) -> bool {
+        let Some(pointer) = self.seat.get_pointer() else {
+            return false;
+        };
+        return pointer
+            .with_grab(|_, grab| {
+                return grab
+                    .as_any()
+                    .is::<crate::core::input::move_grab::MoveGrab>()
+                    || grab
+                        .as_any()
+                        .is::<crate::core::input::resize_grab::ResizeGrab>();
+            })
+            .unwrap_or(false);
+    }
+
     /// The `outputs.<name>.background` colour of `output`, if the file sets one.
     ///
     /// The backends fall back to their own default when this is `None`; the

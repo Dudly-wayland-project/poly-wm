@@ -133,6 +133,36 @@ pub struct Metrics {
     pub outputs: HashMap<String, OutputMetrics>,
     /// Capture counters, across every session.
     pub capture: CaptureMetrics,
+    /// Where the event loop spends its time.
+    pub loop_time: LoopMetrics,
+}
+
+/// Event loop phase timing, for [`Metrics::loop_time`].
+///
+/// A frame that is slow to *reach* the renderer is invisible to any measurement
+/// taken at the renderer, so these four phases exist to say where an iteration
+/// went.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LoopMetrics {
+    /// Iterations of the event loop callback.
+    pub iterations: u64,
+    /// Most recent total iteration time, in **nanoseconds**.
+    ///
+    /// Nanoseconds, not microseconds: an idle iteration is frequently under a
+    /// microsecond, and truncating it to whole microseconds made every phase of
+    /// a healthy loop report exactly zero.
+    pub last_total_ns: u64,
+    /// Most recent client-state update cost, in nanoseconds.
+    pub last_update_ns: u64,
+    /// Most recent frame build and draw cost, in nanoseconds.
+    pub last_render_ns: u64,
+    /// Most recent client flush cost, in nanoseconds.
+    pub last_flush_ns: u64,
+    /// Slowest iteration since startup, in nanoseconds.
+    pub worst_total_ns: u64,
+    /// The phase that dominated that worst iteration: `"update"`, `"render"` or
+    /// `"flush"`.
+    pub worst_phase: String,
 }
 
 /// Frame counters of one output.
@@ -159,6 +189,14 @@ pub struct OutputMetrics {
     /// 95th percentile render duration over the recent history, in
     /// microseconds. A hitch shows up here while the mean still looks healthy.
     pub p95_render_us: u64,
+    /// Most recent wait for the GPU to finish the frame, in microseconds.
+    ///
+    /// Nonzero only on hardware that cannot export a DRM fence: there the
+    /// compositor must wait for completion before queueing, and this is where a
+    /// weak GPU shows up.
+    pub last_sync_wait_us: u64,
+    /// Slowest such wait since startup, in microseconds.
+    pub worst_sync_wait_us: u64,
 }
 
 /// Capture counters, across every session.

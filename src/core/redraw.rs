@@ -268,11 +268,19 @@ impl State {
     /// because a pending session lock is confirmed only after the locked frame
     /// has actually been rendered.
     pub fn refresh_and_flush_clients(&mut self) {
+        // Split the iteration so a hitch can be attributed to a phase instead of
+        // being guessed at: the render call alone says nothing about a frame
+        // that took 100 ms to even reach it.
+        let started = std::time::Instant::now();
+
         self.core.space.refresh();
         crate::core::layout::LayoutManager::tick(self);
         self.core.popups.cleanup();
+        let update = started.elapsed();
 
+        let before_render = std::time::Instant::now();
         self.redraw_queued_outputs();
+        let render = before_render.elapsed();
 
         // A shader reading `u_time` (or the cursor) depends on wall-clock time,
         // so a frame is due again as soon as the last one finished.
@@ -285,9 +293,16 @@ impl State {
         self.core.capture_elements.clear();
         self.core.capture_elements_background.clear();
 
+        let before_flush = std::time::Instant::now();
         if let Err(err) = self.core.display_handle.flush_clients() {
             debug!("error flushing wayland clients: {err}");
         }
+        let flush = before_flush.elapsed();
+
+        self.core
+            .metrics
+            .loop_time
+            .record(started.elapsed(), update, render, flush);
     }
 
     /// Confirm a pending session lock once every output showed a locked frame.
