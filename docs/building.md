@@ -95,6 +95,20 @@ done
 If a module is missing, install the corresponding development package before
 building.
 
+### Nix
+
+The repository ships a flake with the Rust toolchain and every native dependency
+above. It provides a development shell and a package, but no NixOS module or
+session entry; use [installing.md](installing.md) for installation.
+
+```sh
+nix develop
+nix run . -- --backend winit
+```
+
+The shell uses the same libraries as the package, so `cargo run` and the `just`
+recipes work unchanged inside it.
+
 ## Build
 
 From the repository root:
